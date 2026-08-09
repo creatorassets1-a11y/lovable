@@ -310,6 +310,139 @@ void main() {
 }
 )GLSL";
 
+// ------------------------------------------------------------ volumetrics
+//
+// Raymarched light shafts. For each pixel the ray from the eye to the scene
+// surface is walked in fixed steps; at each step the torch cone is evaluated
+// against the same shadow map the surfaces use, so the beam is genuinely
+// occluded — doorframes cut visible wedges out of it, dust hangs in it, and the
+// corridor gains the depth cue that a purely surface-lit scene has no way to
+// express.
+//
+// Runs at half resolution with a per-pixel dither on the start offset, then gets
+// blurred; without the dither, sixteen steps band like a topographic map.
+
+inline const char* volumetric_fs = R"GLSL(
+precision highp float;
+precision highp sampler2DShadow;
+
+in vec2 vUV;
+layout(location = 0) out vec4 oColor;
+
+uniform sampler2D uDepth;
+uniform sampler2DShadow uShadow;
+
+uniform mat4 uInvViewProj;
+uniform mat4 uLightViewProj;
+uniform vec3 uCamPos;
+
+uniform vec3  uTorchPos;
+uniform vec3  uTorchDir;
+uniform vec3  uTorchColor;
+uniform float uTorchInner;
+uniform float uTorchOuter;
+uniform float uTorchRange;
+
+uniform float uDensity;
+uniform float uTime;
+uniform vec2  uResolution;
+
+const int STEPS = 16;
+
+float hash12(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+// Value noise, used as airborne dust rather than as a surface detail.
+float noise3(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float n = i.x + i.y * 57.0 + i.z * 113.0;
+    float a = fract(sin(n) * 43758.5453);
+    float b = fract(sin(n + 1.0) * 43758.5453);
+    float c = fract(sin(n + 57.0) * 43758.5453);
+    float d = fract(sin(n + 58.0) * 43758.5453);
+    float e = fract(sin(n + 113.0) * 43758.5453);
+    float g = fract(sin(n + 114.0) * 43758.5453);
+    float h = fract(sin(n + 170.0) * 43758.5453);
+    float k = fract(sin(n + 171.0) * 43758.5453);
+    return mix(mix(mix(a, b, f.x), mix(c, d, f.x), f.y),
+               mix(mix(e, g, f.x), mix(h, k, f.x), f.y), f.z);
+}
+
+vec3 world_from_depth(vec2 uv, float depth) {
+    vec4 clip = vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+    vec4 w = uInvViewProj * clip;
+    return w.xyz / max(w.w, 1e-6);
+}
+
+void main() {
+    float depth = texture(uDepth, vUV).r;
+    vec3 target = world_from_depth(vUV, depth);
+
+    vec3 ray = target - uCamPos;
+    float total = length(ray);
+    // Beyond the torch's reach there is nothing left to scatter.
+    total = min(total, uTorchRange);
+    if (total < 0.05) { oColor = vec4(0.0); return; }
+    vec3 dir = ray / max(length(ray), 1e-5);
+
+    float step_len = total / float(STEPS);
+    // Dither the entry point so the step pattern turns into noise, not stripes.
+    float offset = hash12(gl_FragCoord.xy + fract(uTime) * 97.0);
+
+    vec3 accum = vec3(0.0);
+    vec3 cone_dir = normalize(uTorchDir);
+
+    for (int i = 0; i < STEPS; i++) {
+        float t = (float(i) + offset) * step_len;
+        vec3 p = uCamPos + dir * t;
+
+        vec3 to_light = uTorchPos - p;
+        float d = length(to_light);
+        if (d > uTorchRange) continue;
+        vec3 l = to_light / max(d, 1e-4);
+
+        float cone = dot(-l, cone_dir);
+        if (cone <= uTorchOuter) continue;
+        float spot = clamp((cone - uTorchOuter) / max(uTorchInner - uTorchOuter, 1e-4), 0.0, 1.0);
+        spot *= spot;
+
+        // Same shadow map as the surface pass: the beam is cut by real geometry.
+        vec4 lp = uLightViewProj * vec4(p, 1.0);
+        vec3 proj = lp.xyz / max(lp.w, 1e-5);
+        proj = proj * 0.5 + 0.5;
+        float vis = 1.0;
+        if (proj.z <= 1.0 && proj.x >= 0.0 && proj.x <= 1.0 &&
+            proj.y >= 0.0 && proj.y <= 1.0) {
+            vis = texture(uShadow, vec3(proj.xy, proj.z - 0.0015));
+        }
+        if (vis <= 0.001) continue;
+
+        // Floor the falloff a metre out: the torch sits *at* the eye, so an
+        // unclamped inverse square makes the first few steps arbitrarily bright
+        // and the whole frame washes to white when looking along the beam.
+        float atten = 1.0 / max(d * d, 1.0);
+
+        // Mie-ish forward scattering: the beam reads brighter looking into it.
+        float phase = 0.55 + 0.45 * pow(clamp(dot(dir, -l), 0.0, 1.0), 4.0);
+
+        // Drifting dust: the beam should never look like clean fog.
+        float dust = 0.55 + 0.85 * noise3(p * 1.9 + vec3(0.0, uTime * 0.06, uTime * 0.03));
+        accum += uTorchColor * spot * atten * vis * dust * phase;
+    }
+
+    // Soft rolloff rather than a hard clamp, so the beam saturates gracefully
+    // instead of clipping to a white card in the middle of the screen.
+    vec3 scatter = accum * uDensity * step_len;
+    scatter = scatter / (1.0 + scatter * 0.55);
+    oColor = vec4(scatter, 1.0);
+}
+)GLSL";
+
 inline const char* bright_fs = R"GLSL(
 precision mediump float;
 in vec2 vUV;
@@ -352,6 +485,8 @@ layout(location = 0) out vec4 oColor;
 
 uniform sampler2D uScene;
 uniform sampler2D uBloom;
+uniform sampler2D uVolumetric;
+uniform float uVolumetricAmount;
 uniform float uTime;
 uniform float uExposure;
 uniform float uBloomAmount;
@@ -399,6 +534,9 @@ void main() {
     color.g = texture(uScene, uv).g;
     color.b = texture(uScene, uv - d * ca).b;
 
+    // Light shafts are added before the tonemap so they roll off with
+    // everything else instead of sitting on top as a flat wash.
+    color += texture(uVolumetric, uv).rgb * uVolumetricAmount;
     color += texture(uBloom, uv).rgb * uBloomAmount;
     color *= uExposure;
     color = aces(color);

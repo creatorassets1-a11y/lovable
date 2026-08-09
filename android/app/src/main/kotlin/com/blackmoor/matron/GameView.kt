@@ -3,6 +3,8 @@ package com.blackmoor.matron
 import android.annotation.SuppressLint
 import android.content.Context
 import android.opengl.GLSurfaceView
+import android.os.VibrationEffect
+import android.os.Vibrator
 import android.view.MotionEvent
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
@@ -20,6 +22,8 @@ import kotlin.math.min
  * you see and what you can press stay in agreement.
  */
 class GameView(context: Context) : GLSurfaceView(context) {
+
+    private val vibrator = context.getSystemService(Vibrator::class.java)
 
     private var viewW = 1
     private var viewH = 1
@@ -69,9 +73,29 @@ class GameView(context: Context) : GLSurfaceView(context) {
 
             override fun onDrawFrame(gl: GL10?) {
                 Native.onDrawFrame()
+                drainHaptics()
             }
         })
         renderMode = RENDERMODE_CONTINUOUSLY
+    }
+
+    /** Play anything the engine queued this frame. The Vibrator is thread-safe,
+     *  so this can run on the GL thread without a hop. */
+    private fun drainHaptics() {
+        if (vibrator?.hasVibrator() != true) return
+        var guard = 0
+        while (guard++ < 4) {
+            val packed = Native.consumeHaptic()
+            if (packed == 0) break
+            val ms = (packed and 0xFFFF).toLong()
+            val amp = (packed shr 16) and 0xFF
+            try {
+                vibrator.vibrate(VibrationEffect.createOneShot(ms, amp))
+            } catch (_: Throwable) {
+                // Some devices refuse amplitude control; the scare is not worth
+                // taking the process down for.
+            }
+        }
     }
 
     fun applyInsets(l: Float, t: Float, r: Float, b: Float) {

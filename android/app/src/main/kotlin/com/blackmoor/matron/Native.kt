@@ -26,6 +26,9 @@ object Native {
     /** 0 interact, 1 torch, 2 pause. */
     external fun press(which: Int)
 
+    /** Drains one queued haptic: ms | (amplitude shl 16), or 0 if none. */
+    external fun consumeHaptic(): Int
+
     external fun getPhase(): Int
 
     const val PHASE_BOOT = 0

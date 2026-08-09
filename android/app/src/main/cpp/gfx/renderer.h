@@ -42,6 +42,9 @@ struct SceneView {
     float torch_outer = 0.72f;      // ~44 deg
     float torch_range = 22.0f;
 
+    /** Airborne scattering. 0 disables the beam entirely. */
+    float volumetric = 0.018f;
+
     v3 ambient{0.020f, 0.022f, 0.030f};
     v3 fog_color{0.020f, 0.021f, 0.026f};
     float fog_density = 0.055f;
@@ -89,6 +92,7 @@ private:
     void build_targets();
     void shadow_pass(const SceneView& v, const std::vector<DrawItem>& items);
     void scene_pass(const SceneView& v, const std::vector<DrawItem>& items);
+    void volumetric_pass(const SceneView& v, float time);
     void bloom_pass();
     void composite(const PostParams& p, float time);
     mat4 torch_view_proj(const SceneView& v) const;
@@ -101,10 +105,12 @@ private:
 
     Shader scene_static_, scene_skinned_, scene_tri_, scene_tri_skinned_;
     Shader shadow_static_, shadow_skinned_;
-    Shader bright_, blur_, post_;
+    Shader bright_, blur_, post_, volumetric_;
 
-    RenderTarget hdr_rt_, shadow_rt_, bloom_a_, bloom_b_;
+    RenderTarget hdr_rt_, shadow_rt_, bloom_a_, bloom_b_, vol_a_, vol_b_;
     mat4 light_vp_;
+    mat4 inv_view_proj_;
+    bool vol_enabled_ = false;
     int draw_calls_ = 0, triangles_ = 0;
     GLuint output_fbo_ = 0;
 };

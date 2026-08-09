@@ -157,6 +157,7 @@ public:
     int height() const { return h_; }
     GLuint color() const { return color_; }
     GLuint depth() const { return depth_tex_; }
+    bool has_depth_texture() const { return depth_tex_ != 0; }
 
 private:
     GLuint fbo_ = 0, color_ = 0, depth_rb_ = 0, depth_tex_ = 0;

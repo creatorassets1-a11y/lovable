@@ -65,6 +65,32 @@ bool asset_exists(const std::string& path) {
     return !asset_read(path).empty();
 }
 
+namespace {
+// Single-producer, single-consumer ring. Deliberately tiny: if scares are
+// queueing up faster than the motor can play them, dropping is correct.
+constexpr int HAPTIC_CAP = 8;
+int g_haptic[HAPTIC_CAP];
+int g_haptic_head = 0, g_haptic_tail = 0;
+}  // namespace
+
+void push_haptic(int ms, int amplitude) {
+    if (ms <= 0) return;
+    int next = (g_haptic_tail + 1) % HAPTIC_CAP;
+    if (next == g_haptic_head) return;      // full; drop the oldest request
+    if (ms > 4000) ms = 4000;
+    if (amplitude < 1) amplitude = 1;
+    if (amplitude > 255) amplitude = 255;
+    g_haptic[g_haptic_tail] = (ms & 0xFFFF) | (amplitude << 16);
+    g_haptic_tail = next;
+}
+
+int pop_haptic() {
+    if (g_haptic_head == g_haptic_tail) return 0;
+    int v = g_haptic[g_haptic_head];
+    g_haptic_head = (g_haptic_head + 1) % HAPTIC_CAP;
+    return v;
+}
+
 void logi(const char* fmt, ...) {
     va_list ap;
     va_start(ap, fmt);

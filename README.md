@@ -49,6 +49,32 @@ escape is possible and costs you exactly the thing that got you caught.
 
 Chapter one is deliberately unable to kill you. It is a lesson in how she works.
 
+### Being caught
+
+The grab is the only time the game takes the camera off you. When she closes the
+last metre, the view is turned to face her over about a fifth of a second, she is
+pulled to 0.72 m and plays the scream clip into the lens, and the frame gets a
+40 Hz shake, a chromatic tear and a glitch pass — with a stepped 520/90/360 ms
+vibration pattern underneath so it reads as being *grabbed* rather than as a
+notification.
+
+Smaller scares fire on transitions, never on states: the first frame she becomes
+visible (in the beam, unobstructed, and facing you) triggers a stinger, a
+sub-bass hit and a buzz scaled by distance, then goes on a nine-second cooldown.
+A sighting across the ward is a chill; one at four metres is a scare. A child
+shrieking near you is the same system with a different source position.
+
+### Fear
+
+Fear is a real variable, not a screen filter. It rises with proximity, darkness,
+and being hunted, and it drives:
+
+- **heartbeat** — gain and clip (slow/fast) tracking fear directly
+- **breathing** — calm to ragged, and always audible while hiding unless you are
+  holding your breath
+- **whispers** — only past 0.72, so they land as a symptom rather than a location
+- movement speed, grain, vignette, desaturation, and a red shift past 0.55
+
 ### The ward children
 
 Burned, crawling, and completely harmless. They follow you, and when one gets a
@@ -69,6 +95,11 @@ listening. They are an alarm system, not an enemy.
 Standing water halves your speed and nearly doubles your noise. Lockers are
 hiding places; inside one you choose between breathing and being heard.
 
+The device vibrates for sightings, shrieks, the start of a hunt and the grab. The
+engine never calls into Java for it: it pushes requests onto a small ring buffer
+that the Kotlin layer drains each frame, which keeps the audio and GL threads out
+of the JVM.
+
 ![the ward](docs/shot-ward.png)
 
 ---
@@ -83,7 +114,7 @@ from scratch:
 
 | | before | now |
 |---|---|---|
-| Rendering | canvas raycaster, ~420px buffer | GLES 3.0 PBR forward renderer |
+| Rendering | canvas raycaster, ~420px buffer | GLES 3.0 PBR forward renderer, volumetric light |
 | Characters | 2D sprites | skinned 3D meshes, 20-bone skeletons, 5 clips |
 | Runtime | WebView + JS | Kotlin shell + C++ engine (`libmatron.so`) |
 | Audio | Web Audio | C++ mixer on AAudio, 3D positional |
@@ -133,6 +164,22 @@ with normal mapping, sampled through UVs for architecture and by **triplanar
 projection** for the creatures, which have no sensible unwrap. Half-float HDR
 target, threshold-and-blur bloom, ACES tonemap, then grain, vignette, chromatic
 aberration and scanlines.
+
+**Volumetric light.** The beam is raymarched — sixteen steps from the eye to the
+scene depth, each evaluated against *the same shadow map the surfaces use*, so
+doorframes cut real wedges out of it and the Matron throws a shaft-shaped hole as
+she crosses. Value noise drifting through the march gives it airborne dust, a
+forward-scattering phase makes it brighter looking into the beam, and the whole
+thing runs at half resolution with a per-pixel dither on the entry point (sixteen
+steps band like a topographic map otherwise), then a separable blur.
+
+Accumulated scattering is soft-rolled off rather than clamped. The torch sits
+*at* the eye, so an unclamped inverse square makes the first steps arbitrarily
+bright — the first version washed the entire frame to white the moment you looked
+down the corridor.
+
+Standing water is a roughness change: in the flooded chapter the floor drops to
+0.09 and the torch lays a real specular streak down the lino.
 
 Internal resolution adapts to hold frame rate: the renderer trades sharpness,
 never smoothness, with a scale factor driven by a running average of frame cost.
@@ -211,11 +258,12 @@ are bad":
 ### What is *not* verified
 
 I cannot run this on a phone. The APK is validated by signature, manifest, and
-the headless harness. Three paths are therefore untested on real hardware:
+the headless harness. Four paths are therefore untested on real hardware:
 **AAudio output** (the mixer is exercised, the device is not), **touch input**,
-and **real-GPU frame timing**. The renderer is built to a 60fps budget on a
-mid-range phone and adapts resolution if it misses, but that budget is an
-estimate, not a measurement.
+**haptics**, and **real-GPU frame timing**. The renderer is built to a 60fps
+budget on a mid-range phone and adapts resolution if it misses, but that budget
+is an estimate, not a measurement — and volumetrics are the most expensive thing
+added since, so that is where a real device is most likely to disagree with me.
 
 ---
 

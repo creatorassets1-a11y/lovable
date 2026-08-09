@@ -291,11 +291,17 @@ void Game::update_player(float dt, const Input& in) {
     p.noise = noise;
     if (noise > 0.05f) emit_noise(p.pos, noise);
 
-    // Footsteps, spaced by speed.
+    // Head bob is driven by the same phase as the footsteps, so the camera dips
+    // when a foot lands instead of drifting against it.
+    float bob_rate = running ? 2.6f : (in.crouch ? 1.1f : 1.7f);
+    bob_phase_ += moving ? dt * bob_rate : 0.0f;
+    bob_amount_ = approach(bob_amount_, moving ? (running ? 1.0f : 0.55f) : 0.0f, 6.0f, dt);
+
     static float step_acc = 0;
-    step_acc += moving ? dt * (running ? 2.6f : (in.crouch ? 1.1f : 1.7f)) : 0.0f;
+    step_acc += moving ? dt * bob_rate : 0.0f;
     if (step_acc >= 1.0f) {
         step_acc = 0;
+        step_flip_ = -step_flip_;
         if (audio_) {
             bool wet = story::CHAPTERS[chapter_ - 1].flooded;
             char name[16];
@@ -381,7 +387,7 @@ void Game::update_matron(float dt) {
                  (dist_to_player < 3.2f && player_.noise > 0.35f))) {
                 m.state = MatronState::Hunt;
                 m.timer = 12.0f;
-                if (audio_) audio_->play("stinger_a", {0.7f});
+                scare(0.85f, m.pos, true);
                 say("m_04");
             } else if (m.timer <= 0 ||
                        length(m.heard_at - m.pos) < 1.2f) {
@@ -524,7 +530,7 @@ void Game::update_children(float dt) {
             c.anim_time = 1.4f;
             c.shriek_cooldown = 12.0f;
             emit_noise(c.pos, 1.4f);
-            player_.fear = clampf(player_.fear + 0.16f, 0, 1);
+            scare(clampf(1.0f - d / 5.0f, 0.25f, 0.8f), c.pos, d < 2.5f);
             if (audio_) {
                 PlayParams pp;
                 pp.gain = 1.0f;
@@ -624,6 +630,141 @@ void Game::update_fear(float dt) {
                             0.35f + player_.fear * 0.4f, 1.2f);
         }
     }
+}
+
+void Game::scare(float strength, v3 from, bool haptic_heavy) {
+    strength = clampf(strength, 0.0f, 1.0f);
+    shake_ = std::max(shake_, strength);
+    flash_ = std::max(flash_, strength * 0.18f);
+    player_.fear = clampf(player_.fear + strength * 0.30f, 0, 1);
+
+    if (audio_) {
+        PlayParams pp;
+        pp.gain = 0.5f + strength * 0.5f;
+        pp.positional = true;
+        pp.pos = from;
+        pp.range = 30.0f;
+        audio_->play(strength > 0.7f ? "stinger_a" : "stinger_c", pp);
+        // The sub is what makes a scare land in the chest rather than the ear.
+        audio_->play("sub_boom", {0.5f + strength * 0.45f});
+    }
+
+    if (haptic_heavy) {
+        push_haptic((int)(180 + strength * 320), (int)(160 + strength * 95));
+    } else {
+        push_haptic((int)(40 + strength * 70), (int)(70 + strength * 90));
+    }
+}
+
+void Game::update_scares(float dt) {
+    sighting_cooldown_ -= dt;
+
+    // A sighting is: in the beam, unobstructed, and close enough to read as a
+    // figure rather than a smudge. Firing on the *transition* is what makes it
+    // a scare instead of a permanent alarm.
+    v3 to_her = matron_.pos - player_.pos;
+    float dist = length(to_her);
+    bool visible = false;
+    if (matron_.state != MatronState::Dormant && dist < 16.0f) {
+        v3 fwd = player_.forward();
+        v3 dir = normalize(v3(to_her.x, 0, to_her.z));
+        float facing = dot(v3(fwd.x, 0, fwd.z), dir);
+        bool lit = player_.torch_on && player_.torch_charge > 0;
+        if (facing > 0.55f && (lit || dist < 5.0f) &&
+            level_.line_of_sight(player_.eye(), matron_.pos + v3(0, 1.2f, 0))) {
+            visible = true;
+        }
+    }
+
+    if (visible && !was_visible_ && sighting_cooldown_ <= 0) {
+        sighting_cooldown_ = 9.0f;
+        // Closer sightings hit harder; one across a long ward is a chill, one
+        // at four metres is a scare.
+        float strength = clampf(1.0f - dist / 16.0f, 0.15f, 1.0f);
+        scare(strength * 0.85f, matron_.pos, dist < 6.0f);
+    }
+    was_visible_ = visible;
+
+    // --- grab sequence
+    if (matron_.state == MatronState::Grab) {
+        if (!grab_active_) {
+            grab_active_ = true;
+            grab_t_ = 0;
+            if (audio_) {
+                audio_->stop_speech();
+                PlayParams pp;
+                pp.gain = 1.0f;
+                audio_->play("scream_matron", pp);
+                audio_->play("sub_boom", {1.0f});
+            }
+            // Long, hard, and stepped, so it reads as being grabbed rather than
+            // as a notification.
+            push_haptic(520, 255);
+            push_haptic(90, 200);
+            push_haptic(360, 255);
+            anim_matron_.play("scream", 0.05f, true);
+        }
+        grab_t_ += dt;
+
+        // Take the camera: turn to face her, and pull her into the lens.
+        v3 d = matron_.pos - player_.pos;
+        float want_yaw = std::atan2(d.z, d.x);
+        float delta = want_yaw - player_.yaw;
+        while (delta > PI) delta -= TAU;
+        while (delta < -PI) delta += TAU;
+        player_.yaw += delta * clampf(dt * 9.0f, 0, 1);
+        player_.pitch = approach(player_.pitch, 0.18f, 6.0f, dt);
+
+        // She closes the last metre herself.
+        v3 want = player_.pos + normalize(v3(d.x, 0, d.z)) * 0.72f;
+        matron_.pos = lerp(matron_.pos, want, clampf(dt * 7.0f, 0, 1));
+        matron_.yaw = want_yaw + PI;
+
+        shake_ = std::max(shake_, 0.55f + 0.45f * std::sin(grab_t_ * 40.0f));
+        anim_matron_.update(dt);
+    } else {
+        grab_active_ = false;
+    }
+}
+
+void Game::update_fear_audio(float dt) {
+    if (!audio_) return;
+
+    // Heartbeat: always running once there is anything to be afraid of, its
+    // gain and rate tracking fear directly.
+    float heart_gain = clampf((player_.fear - 0.12f) * 0.85f, 0.0f, 0.60f);
+    if (heart_voice_ < 0 || !audio_->voice_active(heart_voice_)) {
+        PlayParams pp;
+        pp.gain = 0.0f;
+        pp.loop = true;
+        pp.bus = Bus::Sfx;
+        heart_voice_ = audio_->play(player_.fear > 0.55f ? "heart_fast" : "heart_slow", pp);
+    }
+    audio_->set_voice_gain(heart_voice_, heart_gain);
+
+    // Breathing: ragged once composure is gone, and always while hiding.
+    float breath_gain = player_.hiding
+        ? (player_.holding_breath ? 0.05f : 0.45f)
+        : clampf((player_.fear - 0.45f) * 1.1f, 0.0f, 0.42f);
+    if (breath_voice_ < 0 || !audio_->voice_active(breath_voice_)) {
+        PlayParams pp;
+        pp.gain = 0.0f;
+        pp.loop = true;
+        pp.bus = Bus::Sfx;
+        breath_voice_ = audio_->play(player_.fear > 0.5f ? "breath_panic" : "breath_calm", pp);
+    }
+    audio_->set_voice_gain(breath_voice_, breath_gain);
+
+    // Whispers only at the far end of fear: they should feel like a symptom.
+    float whisper_gain = clampf((player_.fear - 0.72f) * 1.4f, 0.0f, 0.35f);
+    if (whisper_voice_ < 0 || !audio_->voice_active(whisper_voice_)) {
+        PlayParams pp;
+        pp.gain = 0.0f;
+        pp.loop = true;
+        pp.bus = Bus::Ambient;
+        whisper_voice_ = audio_->play("whisper_bed", pp);
+    }
+    audio_->set_voice_gain(whisper_voice_, whisper_gain);
 }
 
 void Game::kill_player(const char* reason) {
@@ -740,6 +881,8 @@ void Game::update(float dt, const Input& in) {
     update_children(dt);
     update_story(dt);
     update_fear(dt);
+    update_scares(dt);
+    update_fear_audio(dt);
 
     if (audio_) {
         v3 f = player_.forward();
@@ -751,10 +894,13 @@ void Game::update(float dt, const Input& in) {
 
 void Game::build_scene(float time) {
     scene_.clear();
+    const float ch_wet = story::CHAPTERS[chapter_ - 1].flooded ? 0.85f : 0.10f;
 
     scene_.push_back({&level_.walls(), mat4_identity(), &m_tile_.mat, nullptr, true});
+    m_floor_.mat.wetness = ch_wet;
     scene_.push_back({&level_.floor(), mat4_identity(), &m_floor_.mat, nullptr, false});
     scene_.push_back({&level_.ceiling(), mat4_identity(), &m_ceiling_.mat, nullptr, true});
+    m_plaster_.mat.wetness = ch_wet * 0.6f;
     scene_.push_back({&level_.trim(), mat4_identity(), &m_plaster_.mat, nullptr, true});
 
     const v3 eye = player_.eye();
@@ -786,20 +932,32 @@ void Game::build_scene(float time) {
     // ---- view
     const story::Chapter& ch = story::CHAPTERS[chapter_ - 1];
     v3 fwd = player_.forward();
-    // Head bob and a fear tremor, both small enough to feel rather than see.
-    float bob = std::sin(time * 7.4f) * 0.012f * (player_.noise > 0.2f ? 1.0f : 0.25f);
-    float tremor = player_.fear * 0.006f;
-    v3 e = eye + v3(0, bob, 0) +
+
+    // Bob: vertical at twice the step rate (both feet), lateral at the step rate
+    // (alternating), plus a fear tremor. All small enough to feel, not see.
+    float ph = bob_phase_ * PI;
+    float bob_y = std::sin(ph * 2.0f) * 0.021f * bob_amount_;
+    float bob_x = std::sin(ph) * 0.016f * bob_amount_;
+    float tremor = player_.fear * 0.0075f;
+
+    v3 right = normalize(cross(fwd, v3(0, 1, 0)));
+    v3 e = eye + v3(0, bob_y, 0) + right * bob_x +
            v3(std::sin(time * 23.0f) * tremor, std::cos(time * 19.0f) * tremor, 0);
 
+    // A slight roll into the step; this is the part that reads as "carried".
+    v3 up = normalize(v3(0, 1, 0) + right * (std::sin(ph) * 0.030f * bob_amount_));
+
     view_.cam_pos = e;
-    view_.view = mat4_look_at(e, e + fwd, v3(0, 1, 0));
+    view_.view = mat4_look_at(e, e + fwd, up);
     view_.proj = mat4_perspective(radians(72.0f),
                                   (float)width_ / (float)std::max(1, height_), 0.05f, 55.0f);
 
     float torch = player_.torch_on ? player_.torch_flicker : 0.0f;
-    view_.torch_pos = e + v3(0, -0.10f, 0) + fwd * 0.15f;
-    view_.torch_dir = fwd;
+    torch_sway_x_ = approach(torch_sway_x_, fwd.x, 9.0f, 1.0f / 60.0f);
+    torch_sway_y_ = approach(torch_sway_y_, fwd.y, 11.0f, 1.0f / 60.0f);
+    v3 beam = normalize(v3(torch_sway_x_, torch_sway_y_, fwd.z));
+    view_.torch_pos = e + v3(0, -0.12f, 0) + right * 0.16f + fwd * 0.15f;
+    view_.torch_dir = beam;
     view_.torch_intensity = 40.0f * torch;
     view_.torch_range = 20.0f;
     view_.torch_color = v3(1.0f, 0.94f, 0.82f);
@@ -807,6 +965,8 @@ void Game::build_scene(float time) {
     view_.ambient = ch.ambient;
     view_.fog_color = ch.fog_color;
     view_.fog_density = ch.fog_density;
+    // Damp air scatters more, and so does panic.
+    view_.volumetric = 0.016f + (ch.flooded ? 0.012f : 0.0f) + player_.fear * 0.008f;
 
     view_.points.clear();
     // A couple of surviving emergency lamps nearest the player.

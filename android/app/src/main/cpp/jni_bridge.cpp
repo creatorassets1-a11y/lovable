@@ -151,6 +151,11 @@ Java_com_blackmoor_matron_Native_onDestroy(JNIEnv*, jclass) {
 }
 
 JNIEXPORT jint JNICALL
+Java_com_blackmoor_matron_Native_consumeHaptic(JNIEnv*, jclass) {
+    return (jint)pop_haptic();
+}
+
+JNIEXPORT jint JNICALL
 Java_com_blackmoor_matron_Native_getPhase(JNIEnv*, jclass) {
     return g_game ? (jint)g_game->phase() : 0;
 }

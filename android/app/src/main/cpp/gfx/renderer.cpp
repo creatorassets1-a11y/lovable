@@ -25,6 +25,8 @@ bool Renderer::init(int width, int height) {
     ok &= bright_.build("bright", shaders::fullscreen_vs, shaders::bright_fs, "");
     ok &= blur_.build("blur", shaders::fullscreen_vs, shaders::blur_fs, "");
     ok &= post_.build("post", shaders::fullscreen_vs, shaders::post_fs, "");
+    ok &= volumetric_.build("volumetric", shaders::fullscreen_vs,
+                            shaders::volumetric_fs, "");
     if (!ok) {
         loge("shader build failed");
         return false;
@@ -52,23 +54,33 @@ void Renderer::build_targets() {
     hdr_rt_ = RenderTarget();
     bloom_a_ = RenderTarget();
     bloom_b_ = RenderTarget();
+    vol_a_ = RenderTarget();
+    vol_b_ = RenderTarget();
 
     // Half-float keeps bloom and the torch's hot core from clipping before the
     // tonemap. Not all GLES 3.0 drivers can render to it, so fall back quietly.
-    hdr_ = hdr_rt_.create(rw_, rh_, GL_RGBA16F, true, false);
+    hdr_ = hdr_rt_.create(rw_, rh_, GL_RGBA16F, true, true);
     if (!hdr_) {
         logi("RGBA16F not renderable, falling back to RGBA8");
         hdr_rt_ = RenderTarget();
-        if (!hdr_rt_.create(rw_, rh_, GL_RGBA8, true, false)) {
+        if (!hdr_rt_.create(rw_, rh_, GL_RGBA8, true, true)) {
             loge("scene target creation failed");
         }
     }
+    vol_enabled_ = hdr_rt_.has_depth_texture();
 
     int bw = std::max(32, rw_ / 2);
     int bh = std::max(32, rh_ / 2);
     GLenum bfmt = hdr_ ? GL_RGBA16F : GL_RGBA8;
     bloom_a_.create(bw, bh, bfmt, false, false);
     bloom_b_.create(bw, bh, bfmt, false, false);
+
+    // Volumetrics run at half resolution and are blurred; the beam has no
+    // high-frequency detail worth paying full rate for.
+    vol_a_ = RenderTarget();
+    vol_b_ = RenderTarget();
+    vol_a_.create(bw, bh, bfmt, false, false);
+    vol_b_.create(bw, bh, bfmt, false, false);
 }
 
 void Renderer::resize(int width, int height) {
@@ -209,6 +221,53 @@ void Renderer::scene_pass(const SceneView& v, const std::vector<DrawItem>& items
     }
 }
 
+void Renderer::volumetric_pass(const SceneView& v, float time) {
+    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+
+    vol_a_.bind();
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    volumetric_.use();
+    volumetric_.set("uDepth", 0);
+    volumetric_.set("uShadow", 1);
+    volumetric_.set("uInvViewProj", inv_view_proj_);
+    volumetric_.set("uLightViewProj", light_vp_);
+    volumetric_.set("uCamPos", v.cam_pos);
+    volumetric_.set("uTorchPos", v.torch_pos);
+    volumetric_.set("uTorchDir", normalize(v.torch_dir));
+    volumetric_.set("uTorchColor", v.torch_color * v.torch_intensity);
+    volumetric_.set("uTorchInner", v.torch_inner);
+    volumetric_.set("uTorchOuter", v.torch_outer);
+    volumetric_.set("uTorchRange", v.torch_range);
+    volumetric_.set("uDensity", v.volumetric);
+    volumetric_.set("uTime", time);
+    volumetric_.set("uResolution", v2((float)vol_a_.width(), (float)vol_a_.height()));
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, hdr_rt_.depth());
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, shadow_rt_.depth());
+    draw_fullscreen();
+
+    // One separable blur pass: enough to hide the dither, not so much that the
+    // shafts lose their edges against a doorframe.
+    vol_b_.bind();
+    blur_.use();
+    blur_.set("uTex", 0);
+    blur_.set("uDir", v2(1.0f / (float)vol_a_.width(), 0.0f));
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, vol_a_.color());
+    draw_fullscreen();
+
+    vol_a_.bind();
+    blur_.set("uDir", v2(0.0f, 1.0f / (float)vol_b_.height()));
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, vol_b_.color());
+    draw_fullscreen();
+}
+
 void Renderer::bloom_pass() {
     glDisable(GL_DEPTH_TEST);
     glDepthMask(GL_FALSE);
@@ -249,6 +308,8 @@ void Renderer::composite(const PostParams& p, float time) {
     post_.use();
     post_.set("uScene", 0);
     post_.set("uBloom", 1);
+    post_.set("uVolumetric", 2);
+    post_.set("uVolumetricAmount", vol_enabled_ ? 1.0f : 0.0f);
     post_.set("uTime", time);
     post_.set("uExposure", p.exposure);
     post_.set("uBloomAmount", p.bloom);
@@ -267,6 +328,8 @@ void Renderer::composite(const PostParams& p, float time) {
     glBindTexture(GL_TEXTURE_2D, hdr_rt_.color());
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, bloom_a_.color());
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, vol_a_.color());
     draw_fullscreen();
 
     glDepthMask(GL_TRUE);
@@ -275,8 +338,10 @@ void Renderer::composite(const PostParams& p, float time) {
 
 void Renderer::render(const SceneView& v, const std::vector<DrawItem>& items,
                       const PostParams& post, float time) {
+    inv_view_proj_ = mat4_inverse(v.proj * v.view);
     shadow_pass(v, items);
     scene_pass(v, items);
+    if (vol_enabled_ && v.volumetric > 0.001f) volumetric_pass(v, time);
     bloom_pass();
     composite(post, time);
 }

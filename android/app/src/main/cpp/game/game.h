@@ -155,6 +155,10 @@ private:
     void update_story(float dt);
     void update_fear(float dt);
     void emit_noise(v3 at, float loudness);
+    /** A scare: stinger, sub-bass, shake, chromatic tear, and a buzz. */
+    void scare(float strength, v3 from, bool haptic_heavy);
+    void update_scares(float dt);
+    void update_fear_audio(float dt);
     void kill_player(const char* reason);
     void say(const char* line_id);
 
@@ -214,6 +218,22 @@ private:
     int width_ = 0, height_ = 0;
     float frame_avg_ms_ = 16.0f;
     float scale_cooldown_ = 0;
+    // Grab sequence: the camera is taken away from the player and pointed at
+    // her while she closes, which is the only time the game moves the view.
+    float grab_t_ = 0;
+    v3 grab_look_from_;
+    bool grab_active_ = false;
+
+    float sighting_cooldown_ = 0;
+    bool was_visible_ = false;
+    int heart_voice_ = -1;
+    int breath_voice_ = -1;
+    int whisper_voice_ = -1;
+    float torch_sway_x_ = 0, torch_sway_y_ = 0;
+    float bob_phase_ = 0;
+    float bob_amount_ = 0;
+    float step_flip_ = 1.0f;
+
     bool interact_prompt_ = false;
     friend struct HudAccess;
     const char* interact_label_ = "";
