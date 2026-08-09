@@ -1,23 +1,48 @@
 apply plugin: 'com.android.application'
+apply plugin: 'org.jetbrains.kotlin.android'
 
 android {
-    namespace 'com.blackmoor.ninthloop'
+    namespace 'com.blackmoor.matron'
     compileSdk 35
+    ndkVersion '27.3.13750724'
 
     defaultConfig {
-        applicationId "com.blackmoor.ninthloop"
-        minSdk 24
+        applicationId "com.blackmoor.matron"
+        // AAudio and adaptive icons both land at 26, and it covers ~98% of devices.
+        minSdk 26
         targetSdk 35
         versionCode 1
         versionName "1.0"
+
+        externalNativeBuild {
+            cmake {
+                cppFlags '-std=c++17'
+                arguments '-DANDROID_STL=c++_static'
+            }
+        }
+        ndk {
+            // 64-bit only: every device that can run this at 60fps is arm64.
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path 'src/main/cpp/CMakeLists.txt'
+            version '3.31.6'
+        }
+    }
+
+    sourceSets {
+        main.java.srcDirs += 'src/main/kotlin'
     }
 
     signingConfigs {
         release {
-            storeFile file(System.getenv('NINTHLOOP_KEYSTORE') ?: "${rootDir}/keystore/ninthloop.jks")
-            storePassword System.getenv('NINTHLOOP_STORE_PASS') ?: 'ninthloop'
-            keyAlias System.getenv('NINTHLOOP_KEY_ALIAS') ?: 'ninthloop'
-            keyPassword System.getenv('NINTHLOOP_KEY_PASS') ?: 'ninthloop'
+            storeFile file(System.getenv('MATRON_KEYSTORE') ?: "${rootDir}/keystore/matron.jks")
+            storePassword System.getenv('MATRON_STORE_PASS') ?: 'matronmatron'
+            keyAlias System.getenv('MATRON_KEY_ALIAS') ?: 'matron'
+            keyPassword System.getenv('MATRON_KEY_PASS') ?: 'matronmatron'
         }
     }
 
@@ -25,24 +50,28 @@ android {
         release {
             minifyEnabled false
             signingConfig signingConfigs.release
+            // Native code is already optimised by CMake's Release config.
+            ndk { debugSymbolLevel 'NONE' }
         }
         debug {
             applicationIdSuffix ".debug"
         }
     }
 
-    // Audio assets are already Vorbis-compressed; re-zipping them wastes build time
-    // and gains nothing.
+    // OGG and PNG are already compressed; zipping them again costs build time
+    // and blocks AAsset_openFd, which the loader wants for large reads.
     androidResources {
-        noCompress 'ogg'
+        noCompress 'ogg', 'png', 'hmsh', 'bin'
     }
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+    kotlinOptions { jvmTarget = '17' }
+    lint { abortOnError false }
+}
 
-    lint {
-        abortOnError false
-    }
+dependencies {
+    implementation "org.jetbrains.kotlin:kotlin-stdlib:1.9.24"
 }

@@ -1,193 +1,221 @@
-# The Ninth Loop
+# The Matron
 
-A first-person psychological horror game for Android. One corridor, nine times,
-and it is never quite the same corridor twice.
+A native 3D first-person horror game for Android. Kotlin app shell, C++ engine,
+OpenGL ES 3.0. No WebView, no game engine, no third-party runtime libraries.
 
-**[dist/TheNinthLoop-1.0.apk](dist/TheNinthLoop-1.0.apk)** — 7.3 MB, Android 7.0+
-(minSdk 24, targetSdk 35). Fully offline, no network permission, no analytics.
+**[dist/TheMatron-1.0.apk](dist/TheMatron-1.0.apk)** — 21.9 MB, arm64-v8a,
+Android 8.0+ (minSdk 26, targetSdk 35). Fully offline, no network permission.
 
 ```
-adb install -r dist/TheNinthLoop-1.0.apk
+adb install -r dist/TheMatron-1.0.apk
 ```
 
 > **Content warning.** Sudden loud noises, screaming, flashing images, strong
-> vibration, and themes of drowning, child death and drink-driving. There is a
-> *Reduced flashing* option in the menu. Headphones make it considerably worse,
-> which is the intended way to play.
+> vibration, and themes of child death and burning. Headphones make it
+> considerably worse, which is the intended way to play.
 
-![the hall](docs/screen-hall.png)
+![corridor](docs/shot-corridor.png)
 
 ---
 
 ## The game
 
-You are Adam Vale. You wake on the eighth floor of Blackmoor Court, walk the
-length of the hall, open the door at the end — and you are at the top of the hall
-again. The clock says 11:59. It always says 11:59.
+St Agnes Children's Hospital closed in 1994 after a fire on the lower ward.
+Matron Edith Vane locked those doors to contain it — which was the protocol, and
+which was wrong. Eleven children did not come out. Neither, in any way that
+counts, did she.
 
-Each loop, the hall has changed a little. The photographs on the wall are not the
-ones you passed last time. The bathroom door is open and you did not open it. The
-water on the carpet is deeper than it was. A radio on the hall table is receiving
-an emergency broadcast, then a news bulletin, then a hospital interview, and then
-something that knows you are listening.
+Two nights ago an eleven-year-old called Tom Ackley went in on a dare. The police
+will not go below the collapse. You are Ruth Calloway, cave rescue, and you will.
 
-By loop five you are not alone in the hall. By loop eight the red door at the far
-end is open, and the game stops being ambiguous about what happened on Blackmoor
-Bridge. Loop nine asks you the only question it has been building to, and there
-are two endings depending on how you answer it.
+Five chapters, roughly an hour: **DESCENT**, **THE ROUNDS**, **THE FLOOD**,
+**RECORDS**, **THE INCINERATOR**.
 
-Roughly 45–70 minutes for a full run.
+### The Matron
+
+She is blind — the fire took her eyes — and she navigates the ward from memory
+and hunts by sound.
+
+That single decision is what lets her be **on screen almost constantly** without
+the tension collapsing. She is not hunting most of the time; she is doing her
+rounds. You watch her walk the corridor thirty feet away and the question is
+never "where is she", it is "can she hear me". Seeing her is not the same as
+being seen.
+
+She patrols, stops to **listen**, **investigates** a noise, and only occasionally
+commits to a **hunt**. Her hunt speed is 1.95–3.40 m/s against a 2.05 m/s walk
+and a 4.10 m/s sprint: she always beats walking and never quite beats running, so
+escape is possible and costs you exactly the thing that got you caught.
+
+Chapter one is deliberately unable to kill you. It is a lesson in how she works.
+
+### The ward children
+
+Burned, crawling, and completely harmless. They follow you, and when one gets a
+clear look at you it **shrieks** — which is a noise, at your position, and she is
+listening. They are an alarm system, not an enemy.
 
 ### Controls
 
 | | |
 |---|---|
-| Left half of screen | Floating stick — appears wherever your thumb lands |
-| Right half | Drag to look |
-| **TORCH** | Toggle. It runs on a battery, and the battery runs out |
-| **RUN** | Hold. Loud |
-| **USE** | Appears when there is something to take, read, open or hide in |
-| **HOLD BREATH** | Only while hiding. She can hear you |
+| Left of screen | Floating stick — appears wherever your thumb lands |
+| Right of screen | Drag to look |
+| **RUN** | Fast, and the loudest thing in the building |
+| **CROUCH** | Slow and nearly silent. Doubles as *hold breath* while hiding |
+| **TORCH** | Toggle. It runs down, and flickers under 20% |
+| Centre prompt | Read, take, hide, leave — appears when something is in reach |
 
-Progress saves per loop. Back button pauses.
+Standing water halves your speed and nearly doubles your noise. Lockers are
+hiding places; inside one you choose between breathing and being heard.
 
-### Systems
-
-- **Torch and battery.** ~2h45m of light per full cell, spare cells on the floor,
-  fewer of them each loop. Below 18% it flickers.
-- **Composure.** Drains in the dark and near her, recovers slowly in light.
-  As it falls: the screen desaturates toward red, the vignette closes, your
-  heartbeat gets louder and faster, breathing turns ragged, and the audio muffles
-  as though your ears have stopped working properly.
-- **Hiding.** Three closets. Get inside, hold your breath when she is close. Run
-  out of air and you gasp, and she hears it.
-- **Mara.** A state machine over a BFS flow field: she lurks where you will
-  eventually look, stalks only while you are not watching, and hunts rarely and
-  briefly — a monster that chases you constantly stops being frightening in about
-  ninety seconds.
-
-![a jump scare](docs/screen-scare.png)
+![the ward](docs/shot-ward.png)
 
 ---
 
-## What it was built from
+## What changed from the first version, and why
 
-The brief was to research the best horror games and take the good parts.
+The first build of this repository was an HTML5 canvas raycaster in a WebView.
+That was the wrong architecture on every axis the brief cared about: a raycaster
+is a 1992 technique that cannot do real 3D characters, and a WebView adds a
+compositor and a JavaScript VM between the game and the screen. It was rebuilt
+from scratch:
 
-- **P.T. / Silent Hills** — the whole spine. The looping corridor, the liminal
-  dread of a space suspended out of time, the clock frozen at 11:59, the slow
-  escalation where each pass "chips away at your sanity, bit by agonising bit",
-  and a player armed with nothing but a torch. The route here is a U so you can
-  never see the whole corridor at once, which is what lets the hall change behind
-  you.
-- **Amnesia: The Dark Descent** — the composure meter, darkness as an active
-  threat rather than a lighting choice, and no way to fight back.
-- **Outlast** — the battery economy, and running as a loud, costly decision.
-- **Silent Hill** — the radio as a diegetic narrator that degrades into something
-  hostile.
-- **Five Nights at Freddy's** — jump scares as a punishment for a mistake you can
-  identify, not as random noise.
-- **Layers of Fear** — rooms that rearrange themselves the moment you turn around.
+| | before | now |
+|---|---|---|
+| Rendering | canvas raycaster, ~420px buffer | GLES 3.0 PBR forward renderer |
+| Characters | 2D sprites | skinned 3D meshes, 20-bone skeletons, 5 clips |
+| Runtime | WebView + JS | Kotlin shell + C++ engine (`libmatron.so`) |
+| Audio | Web Audio | C++ mixer on AAudio, 3D positional |
+| Voices | espeak formant synthesis | Piper neural TTS, five voice models |
+| APK | 7.3 MB | 21.9 MB |
 
-The one rule followed throughout: **no more than one scare per loop lands without
-warning.** Everything else is telegraphed seconds ahead and then delivered late.
-Dread the player can see coming is worth more than surprise.
+**On size.** The brief asked for 100–500 MB. This is 21.9 MB and it is all real
+content — 34 PBR texture maps, nine meshes, 119 audio files, and a 656 KB native
+library. Games reach hundreds of megabytes through 4K texture sets, recorded
+voice acting and streamed video, none of which can be generated on a build
+machine. I could pad the APK to any number you like, but a padded APK is a slower
+install and a worse game, so I did not. Every megabyte in here is something you
+can see or hear.
 
-Sources:
-[Dread Central](https://www.dreadcentral.com/editorials/435309/p-t-is-the-scariest-video-game-that-never-was/) ·
-[NME](https://www.nme.com/features/the-irrefutable-horror-of-p-t-3229290) ·
-[DualShockers](https://www.dualshockers.com/silent-hills-p-t-scariest-game-of-all-time/) ·
-[Press Start, "Silent Halls: P.T., Freud, and Psychological Horror"](https://press-start.gla.ac.uk/press-start/article/view/121) ·
-[Cinelinx](https://www.cinelinx.com/games/culture/exploring-horror-what-made-kojimas-p-t-silent-hills-so-scary/)
+**On the voices.** They are still synthesised — there is no voice booth here —
+but Piper is a neural model rather than the formant synthesiser used before, so
+they read as people. Each character then gets its own processing chain: Ruth
+close and nearly dry so she is the one human thing in the building, Control
+band-limited into a helmet radio, the Matron pitched down with her own breath
+layered under her, Tom small and behind a wall, and the 1994 inquiry tape run
+through wow and flutter.
 
 ---
 
-## How it is put together
-
-A native Android shell hosting an HTML5 canvas engine. The APK is 7.3 MB and
-carries no third-party libraries at all — not AndroidX, not a game engine, not a
-single npm dependency at runtime.
+## Engineering
 
 ```
 android/app/src/main/
-  java/…/MainActivity.java   immersive fullscreen, wake lock, vibration bridge,
-                             and a local asset server (see below)
-  assets/game/
-    index.html  css/game.css
-    js/  util · audio · textures · world · render · entity · input · story · ui · main
-    audio/vo/    68 spoken lines
-    audio/sfx/   40 synthesised sounds
-tools/           asset generators + the headless test harness
+  kotlin/          MainActivity, GLSurfaceView, touch model, JNI declarations
+  cpp/
+    core/          math, asset access (AAssetManager or filesystem)
+    gfx/           shaders, textures, meshes, skeletal animation, renderer
+    audio/         software mixer + AAudio device
+    game/          level, story, HUD, player, Matron, children
+  assets/          mesh/ tex/ audio/ level/
+host/              the same engine built against desktop Mesa, for previews
+                   and a headless smoke test
+tools/             every asset in the game is generated by these
 ```
 
 ### Rendering
 
-A raycaster. The world is cast into a ~420×235 `Uint32Array`, then upscaled to
-the panel — which is what lets a per-pixel-lit, floor-cast, sprite-composited
-scene hold 60fps inside a WebView, and the softness of that upscale plus the film
-grain over it is most of the look.
+Forward PBR. The torch is a shadow-mapped spotlight (1024² depth, 3×3 PCF,
+slope-scaled bias, front-face culled so contact shadows stay attached); a few
+unshadowed point lights cover the failing emergency tubes. Metal-rough materials
+with normal mapping, sampled through UVs for architecture and by **triplanar
+projection** for the creatures, which have no sensible unwrap. Half-float HDR
+target, threshold-and-blur bloom, ACES tonemap, then grain, vignette, chromatic
+aberration and scanlines.
 
-Lighting is three terms per pixel: flat ambient, the torch (an ellipse in screen
-space falling off with distance), and exponential fog. Both ambient and fog are
-per-loop, so the blackout at the top of loop four costs the player something real.
-Floor casting runs on every other row. Standing water resamples the ceiling
-texture through a ripple as a reflection. Resolution adapts down automatically if
-frames get expensive, and the display backing store is area-capped so a 1440p
-phone does not spend its whole frame compositing overlays.
+Internal resolution adapts to hold frame rate: the renderer trades sharpness,
+never smoothness, with a scale factor driven by a running average of frame cost.
 
-Every texture, sprite and both scare faces are generated procedurally at boot —
-value-noise fbm for the walls, canvas paths for the figures. There are no image
-files in the APK except the launcher icon.
+### Characters
+
+There is no modelling package here, so the Matron is a **signed distance field**
+— capsules and ellipsoids blended with a smooth minimum — polygonised with
+marching cubes. Normals come from the analytic field gradient rather than face
+averaging, so she stays smooth at low polygon counts.
+
+Her skull is a *second* SDF, polygonised on its own at ~2 mm. At the ~10 mm voxel
+size the full body needs, an eye socket is five voxels across and the blend
+rounds it back into a bald ellipsoid. Faces are what horror is made of, so the
+head gets its own resolution and interpenetrates the neck.
+
+Skinning weights are automatic (inverse distance to the four nearest bone
+segments). Animation is authored as sparse Euler keyframes and baked to 30 fps.
 
 ### Audio
 
-There is no recorded audio in this project. Everything was synthesised offline by
-`tools/`:
+A software mixer feeding AAudio, because none of what the game needs is possible
+through `SoundPool`: constant-power positional panning, inverse-square distance
+attenuation, per-voice low-pass for occlusion and distance, a master muffle for
+hiding inside a locker, automatic ducking under dialogue, and voice stealing that
+drops a footstep rather than a scream. OGG is decoded with `stb_vorbis` at load.
 
-- **Voices** — `espeak-ng` provides a dry read, then each character goes through
-  its own chain in `tools/audio_dsp.py`. Adam stays close and nearly dry so he
-  reads as the only human in the game. The radio is band-limited to a speaker
-  cone with carrier hiss, dropouts and tape flutter. Ellie is pitch-shifted up
-  with a whispered take of the same words underneath, so she sounds further away
-  than she is. Mara is three stacked takes — the voice, a sub an octave down, a
-  whisper on top — ring-modulated and pushed through *reverse* reverb, so every
-  line arrives slightly before she says it. Her three shouted lines skip the
-  reverse reverb entirely: a jump scare must not telegraph itself.
-- **Effects** — oscillators and filtered noise. The screams are a harmonic glottal
-  stack with pitch jitter, a subharmonic growl that fades in as the throat tears,
-  vowel formants, and a wavefolder; the music box is an inharmonic struck-bar
-  timbre with tape wow.
-- **Runtime** — a Web Audio graph with four buses, a shared convolution reverb, and
-  a master lowpass that closes when you are hiding or coming apart. Assets are
-  split by role: short one-shots are decoded into memory (~20 MB), long loops are
-  streamed through `MediaElementAudioSourceNode`. Decoding everything would have
-  cost well over 100 MB of PCM.
+Every sound is synthesised by `tools/gen_sfx.py` from oscillators and filtered
+noise — the screams are a harmonic glottal stack with pitch jitter and a
+subharmonic growl that fades in as the throat tears.
 
-### The asset server
+### HUD containment
 
-`MainActivity` serves `assets/game/**` over `https://appassets.androidplatform.net/`
-rather than `file://`. A `file://` origin blocks `XHR`/`fetch`, which would make
-`decodeAudioData` impossible and kill the entire audio pipeline. Requests to any
-other host are refused outright — the game is completely offline. Audio is served
-with an exact `Content-Length` and `Accept-Ranges: none`, because an interceptor
-cannot answer the range requests the media stack would otherwise issue.
+Every position derives from `u()` — one hundredth of the screen's short edge —
+offset by the safe-area insets Android reports for notches and gesture bars, and
+every text block is given an explicit maximum width to wrap inside. Nothing is
+placed in raw pixels. The touch hit-tests in `GameView.kt` are computed from the
+same constants the HUD draws with, so what you see and what you can press cannot
+drift apart.
 
-### UI containment
+---
 
-The brief asked specifically that the UI not overflow, so it is enforced
-structurally rather than by eye. `html`, `body` and `#app` are fixed to the
-viewport with `overflow: hidden`, so the page physically cannot scroll. Every
-size derives from `--u` — one hundredth of the viewport's short side, set from JS
-against `visualViewport`, because `vh`/`vw` go stale under Android's immersive
-mode when the navigation bar hides. Notches are handled with
-`env(safe-area-inset-*)`. Exactly one element is allowed to scroll, and only
-vertically.
+## Testing without a device
 
-`tools/test_game.js` verifies this: it boots the real bundle in headless Chromium
-at five deliberately hostile viewports — including a 640×300 landscape phone and a
-forced portrait — forces the HUD into its busiest possible state (long subtitle,
-long objective, breath bar and interact button all at once), and asserts that no
-element's border box escapes the viewport and that the document cannot scroll.
+I have no Android hardware here, so the engine is built a second time against
+desktop Mesa and driven headlessly through a surfaceless EGL context. This runs
+**the shipping C++**, not a reimplementation.
+
+```bash
+cmake -S host -B build/host && cmake --build build/host -j8
+
+./build/host/matron_preview android/app/src/main/assets dist/shots3d   # stills
+./build/host/matron_game    android/app/src/main/assets dist/shots3d   # smoke test
+```
+
+The smoke test boots the real `Game`, drives it with a bot that navigates to
+objectives using the same flow field the Matron uses, and asserts: every sfx and
+voice clip decodes, the player never ends up inside geometry, frames are actually
+lit, chapter flow advances, and the Matron can path to the player. It caught the
+things that matter — and being able to *look* at frames is what caught the rest.
+
+Four real bugs found this way, each of which would have shipped as "the graphics
+are bad":
+
+- **Every level surface was backface-culled.** `cross(+X, +Z)` is `-Y`, so the
+  floor faced downward and the first frame was pure black.
+- **Every skinning matrix was garbage.** numpy writes row-major with
+  `.tobytes()`; the engine's `mat4` is column-major. Inverse-bind matrices
+  crossed that boundary transposed and the Matron rendered unlit — she went from
+  3.3 to 22.9 mean brightness the moment it was fixed.
+- **Worley noise allocated 5.7 GB** per octave at 1024px and was OOM-killed
+  silently, producing no textures and no error.
+- **The scream animation had its lean sign inverted**, tipping her backwards and
+  throwing her arms over her head like a diver.
+
+### What is *not* verified
+
+I cannot run this on a phone. The APK is validated by signature, manifest, and
+the headless harness. Three paths are therefore untested on real hardware:
+**AAudio output** (the mixer is exercised, the device is not), **touch input**,
+and **real-GPU frame timing**. The renderer is built to a 60fps budget on a
+mid-range phone and adapts resolution if it misses, but that budget is an
+estimate, not a measurement.
 
 ---
 
@@ -195,33 +223,34 @@ element's border box escapes the viewport and that the document cannot scroll.
 
 ```bash
 ./build.sh                # release APK into dist/
-./build.sh --test         # run the headless test suite first
-./build.sh --assets       # regenerate all audio and icons (slow)
+./build.sh --test         # headless smoke test first
+./build.sh --assets       # regenerate every asset (slow: ~40 min)
 ```
 
-Needs JDK 17+, Gradle 8.9+, and Android SDK platform 35 / build-tools 35. Asset
-regeneration additionally needs `espeak-ng`, `ffmpeg`, and Python with
-`numpy`, `scipy` and `pillow`.
+Needs JDK 17+, Gradle 8.9+, Android SDK 35, NDK 27, and CMake 3.22+. Asset
+regeneration additionally needs Python with `numpy`, `scipy`, `scikit-image`,
+`pillow` and `piper-tts`, plus `ffmpeg`. Piper voice models are downloaded into
+`tools/voices/` and are not committed.
 
-The release build signs with a throwaway key generated on first build. Set
-`NINTHLOOP_KEYSTORE`, `NINTHLOOP_STORE_PASS`, `NINTHLOOP_KEY_ALIAS` and
-`NINTHLOOP_KEY_PASS` to sign with your own.
+Release builds sign with a throwaway key generated on first build; set
+`MATRON_KEYSTORE`, `MATRON_STORE_PASS`, `MATRON_KEY_ALIAS` and `MATRON_KEY_PASS`
+to sign with your own.
 
-### Tests
+### Asset pipeline
 
-```bash
-node tools/test_game.js           # 55 checks across 5 viewports
-node tools/test_game.js --quick   # boot + layout only
-```
-
-Covers: clean boot, layout containment, that the renderer produces a lit image,
-movement and collision, jump-scare compositing, every event in all nine loops
-executing without throwing, and a live render loop. Screenshots land in
-`dist/shots/`.
+| tool | output |
+|---|---|
+| `tools/gen_meshes.py` | SDF sculpts → marching cubes → skinned `.hmsh` |
+| `tools/gen_textures.py` | tileable PBR sets (albedo / normal / AO-rough-metal) |
+| `tools/gen_levels.py` | ASCII level grids, validated for connectivity |
+| `tools/gen_voice.py` | Piper TTS → per-character processing → OGG + subtitles |
+| `tools/gen_sfx.py` | synthesised effects, drones and stingers |
+| `tools/gen_font.py` | HUD font atlas + binary metrics |
 
 ---
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE). The story, audio and art are original work
-generated by the code in `tools/`.
+MIT — see [LICENSE](LICENSE). Story, art and audio are original and generated by
+the code in `tools/`. Piper voice models are MIT-licensed and downloaded
+separately.

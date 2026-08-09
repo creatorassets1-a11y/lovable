@@ -1,16 +1,22 @@
 # Build output
 android/build/
 android/app/build/
+android/app/.cxx/
 android/.gradle/
 android/local.properties
+build/
 
 # Signing material never belongs in the repo; build.sh generates a local one.
 android/keystore/
 
+# Piper voice models: ~400 MB of weights, downloaded on demand.
+tools/voices/
+
 # Test artefacts
+dist/shots3d/
 dist/shots/
 
-# Node (only used by the headless test harness)
+# Node (the old WebView test harness; kept for history only)
 node_modules/
 package-lock.json
 

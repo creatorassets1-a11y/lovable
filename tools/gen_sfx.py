@@ -20,7 +20,7 @@ import audio_dsp as A  # noqa: E402
 SR = A.SR
 RNG = np.random.default_rng(1312)
 OUT = os.path.join(os.path.dirname(__file__), "..", "android", "app", "src", "main",
-                   "assets", "game", "audio", "sfx")
+                   "assets", "audio", "sfx")
 
 
 def t_arr(seconds):
@@ -571,11 +571,50 @@ def sfx_ending():
 
 # ---------------------------------------------------------------- registry
 
+def sfx_gasp():
+    """A held breath giving out. Sharp intake, voiced, immediately regretted."""
+    d = 0.55
+    n = int(d * SR)
+    nz = RNG.normal(0, 1, n).astype(np.float32)
+    air = A.bandpass(nz, 700, 6500) * A.half_sine(n, 0.6)
+    voice = A.osc(RNG.uniform(180, 230), d, "saw") * A.half_sine(n, 2.2) * 0.25
+    voice = A.peaking(voice, 750, 3.0, 9.0)
+    y = A.mix(A.norm(air, 0.85), A.norm(voice, 0.5))
+    y = A.highpass(y, 260)
+    y = A.reverb(y, amount=0.20, seconds=1.1, decay=6.0, lo=300, hi=7000)
+    return A.norm(A.fade(y, 0.004, 0.18), 0.9)
+
+
+def sfx_click():
+    """Torch switch."""
+    d = 0.06
+    n = int(d * SR)
+    nz = RNG.normal(0, 1, n).astype(np.float32)
+    y = A.bandpass(nz, 1800, 9000) * np.exp(-np.linspace(0, 70, n, dtype=np.float32))
+    return A.norm(A.fade(A.to_stereo(y), 0.0002, 0.02), 0.7)
+
+
+def sfx_locker():
+    """A steel door opening and shutting on you."""
+    creak = sfx_door_creak(seed=41, seconds=0.9)
+    d = int(0.35 * SR)
+    nz = RNG.normal(0, 1, d).astype(np.float32)
+    clunk = A.lowpass(nz, 260) * np.exp(-np.linspace(0, 18, d, dtype=np.float32))
+    body = A.osc(96, 0.35, "sine") * np.exp(-np.linspace(0, 12, d, dtype=np.float32))
+    hit = A.mix(A.norm(clunk, 0.9), A.norm(body, 0.6))
+    y = A.mix(A.gain(creak, -4), A.pad(A.to_stereo(hit), before=0.62))
+    y = A.reverb(y, amount=0.28, seconds=1.4, decay=4.5, lo=120, hi=6000)
+    return A.norm(A.fade(y, 0.003, 0.2), 0.88)
+
+
 BANK = {
     # jump scares
-    "scream_mara": (sfx_scream_mara, 4, False),
-    "scream_mara2": (sfx_scream_mara_2, 4, False),
-    "scream_child": (sfx_scream_child, 3, False),
+    "scream_matron": (sfx_scream_mara, 4, False),
+    "scream_matron2": (sfx_scream_mara_2, 4, False),
+    "child_shriek": (sfx_scream_child, 3, False),
+    "gasp": (sfx_gasp, 3, True),
+    "click": (sfx_click, 2, True),
+    "locker": (sfx_locker, 3, False),
     "giggle": (sfx_giggle, 3, False),
     "sub_boom": (sfx_sub_boom, 4, True),
     "stinger_a": (lambda: sfx_stinger(2, 2.6, 98), 3, False),
