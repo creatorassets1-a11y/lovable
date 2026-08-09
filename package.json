@@ -1,0 +1,23 @@
+{
+  "name": "lovable",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/creatorassets1-a11y/lovable.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/creatorassets1-a11y/lovable/issues"
+  },
+  "homepage": "https://github.com/creatorassets1-a11y/lovable#readme",
+  "dependencies": {
+    "playwright": "^1.62.1"
+  }
+}

@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>The Ninth Loop</title>
+<link rel="stylesheet" href="css/game.css">
+</head>
+
+<!--
+  Every screen lives inside #app, which is position:fixed to the viewport and
+  overflow:hidden. Nothing in this document is allowed to size itself in a way
+  that can push past that box — see css/game.css for the rules that enforce it.
+-->
+
+<div id="app">
+
+  <!-- The render target. Sized in JS to the *visual* viewport, never by CSS content flow. -->
+  <canvas id="view"></canvas>
+
+  <!-- Full-screen scare overlay: face, flashes, static. Above the world, below the HUD. -->
+  <canvas id="scare" class="overlay-canvas" aria-hidden="true"></canvas>
+
+  <!-- ---------------------------------------------------------------- HUD -->
+  <div id="hud" class="layer hidden" aria-hidden="true">
+
+    <div class="hud-top safe-pad">
+      <div class="hud-left">
+        <div id="loop-badge" class="badge">LOOP <span id="loop-num">1</span></div>
+        <div id="clock" class="badge clock">11:59</div>
+      </div>
+      <div class="hud-right">
+        <div id="battery" class="meter" title="torch">
+          <span class="meter-icon">&#9612;</span>
+          <span class="meter-track"><span id="battery-fill" class="meter-fill"></span></span>
+        </div>
+        <div id="sanity" class="meter" title="composure">
+          <span class="meter-icon">&#9829;</span>
+          <span class="meter-track"><span id="sanity-fill" class="meter-fill sanity"></span></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Objective ticker -->
+    <div id="objective" class="objective"></div>
+
+    <!-- Subtitles. Constrained so long lines wrap instead of stretching the box. -->
+    <div id="subs" class="subs" role="status" aria-live="polite"></div>
+
+    <!-- Touch controls -->
+    <div id="stick-zone" class="stick-zone"></div>
+    <div id="stick" class="stick" aria-hidden="true"><div id="stick-nub" class="stick-nub"></div></div>
+
+    <div class="actions safe-pad">
+      <button id="btn-torch" class="act" type="button" aria-label="Torch">
+        <span class="act-glyph">&#9788;</span><span class="act-label">TORCH</span>
+      </button>
+      <button id="btn-use" class="act act-primary hidden" type="button" aria-label="Interact">
+        <span class="act-glyph">&#10022;</span><span class="act-label" id="use-label">USE</span>
+      </button>
+      <button id="btn-run" class="act" type="button" aria-label="Run">
+        <span class="act-glyph">&#187;</span><span class="act-label">RUN</span>
+      </button>
+    </div>
+
+    <!-- Shown only while hidden in a closet -->
+    <button id="btn-breath" class="breath-btn hidden" type="button">
+      HOLD BREATH
+      <span class="breath-track"><span id="breath-fill"></span></span>
+    </button>
+
+    <button id="btn-menu" class="menu-btn safe-pad" type="button" aria-label="Pause">&#9612;&#9612;</button>
+  </div>
+
+  <!-- ------------------------------------------------------------- SCREENS -->
+
+  <!-- Boot / loading -->
+  <section id="scr-load" class="layer screen">
+    <div class="screen-inner">
+      <h1 class="title">THE<br><span class="title-big">NINTH</span><br>LOOP</h1>
+      <p class="sub-title">blackmoor court &middot; floor eight</p>
+      <div class="load-track"><div id="load-fill"></div></div>
+      <p id="load-text" class="load-text">waking up&hellip;</p>
+    </div>
+  </section>
+
+  <!-- Title / start -->
+  <section id="scr-title" class="layer screen hidden">
+    <div class="screen-inner">
+      <h1 class="title">THE<br><span class="title-big">NINTH</span><br>LOOP</h1>
+      <p class="sub-title">blackmoor court &middot; floor eight</p>
+      <div class="warn">
+        <p><strong>Headphones strongly recommended.</strong></p>
+        <p>Contains sudden loud noises, flashing images and themes of death.</p>
+      </div>
+      <div class="btn-row">
+        <button id="btn-start" class="big-btn" type="button">BEGIN</button>
+        <button id="btn-continue" class="big-btn ghost hidden" type="button">CONTINUE</button>
+      </div>
+      <div class="btn-row">
+        <button id="btn-opts" class="small-btn" type="button">OPTIONS</button>
+      </div>
+      <p class="credit">turn the lights off.</p>
+    </div>
+  </section>
+
+  <!-- Options -->
+  <section id="scr-opts" class="layer screen hidden">
+    <div class="screen-inner scrollable">
+      <h2 class="heading">OPTIONS</h2>
+
+      <label class="opt">
+        <span class="opt-name">Master volume</span>
+        <input id="opt-vol" type="range" min="0" max="100" value="90">
+      </label>
+      <label class="opt">
+        <span class="opt-name">Look sensitivity</span>
+        <input id="opt-sens" type="range" min="20" max="200" value="100">
+      </label>
+      <label class="opt opt-check">
+        <span class="opt-name">Vibration</span>
+        <input id="opt-haptic" type="checkbox" checked>
+      </label>
+      <label class="opt opt-check">
+        <span class="opt-name">Subtitles</span>
+        <input id="opt-subs" type="checkbox" checked>
+      </label>
+      <label class="opt opt-check">
+        <span class="opt-name">Invert look Y</span>
+        <input id="opt-invy" type="checkbox">
+      </label>
+      <label class="opt opt-check">
+        <span class="opt-name">Reduced flashing</span>
+        <input id="opt-flash" type="checkbox">
+      </label>
+      <label class="opt">
+        <span class="opt-name">Render quality</span>
+        <input id="opt-qual" type="range" min="50" max="150" value="100">
+      </label>
+
+      <div class="btn-row">
+        <button id="btn-opts-back" class="big-btn ghost" type="button">BACK</button>
+      </div>
+      <div class="btn-row">
+        <button id="btn-wipe" class="small-btn danger" type="button">ERASE PROGRESS</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Pause -->
+  <section id="scr-pause" class="layer screen hidden">
+    <div class="screen-inner">
+      <h2 class="heading">PAUSED</h2>
+      <p class="pause-loop">loop <span id="pause-loop-num">1</span> of nine</p>
+      <div class="btn-row"><button id="btn-resume" class="big-btn" type="button">RESUME</button></div>
+      <div class="btn-row"><button id="btn-pause-opts" class="small-btn" type="button">OPTIONS</button></div>
+      <div class="btn-row"><button id="btn-quit" class="small-btn danger" type="button">ABANDON</button></div>
+    </div>
+  </section>
+
+  <!-- Between-loop interstitial -->
+  <section id="scr-loop" class="layer screen hidden">
+    <div class="screen-inner">
+      <p class="loop-kicker">loop</p>
+      <p id="loop-roman" class="loop-roman">I</p>
+      <p id="loop-caption" class="loop-caption"></p>
+    </div>
+  </section>
+
+  <!-- Caught / death -->
+  <section id="scr-dead" class="layer screen hidden">
+    <div class="screen-inner">
+      <h2 class="heading dead">SHE FOUND YOU</h2>
+      <p id="dead-line" class="dead-line"></p>
+      <div class="btn-row"><button id="btn-retry" class="big-btn" type="button">AGAIN</button></div>
+    </div>
+  </section>
+
+  <!-- Ending -->
+  <section id="scr-end" class="layer screen hidden">
+    <div class="screen-inner scrollable">
+      <h2 id="end-title" class="heading">&nbsp;</h2>
+      <div id="end-body" class="end-body"></div>
+      <div class="btn-row"><button id="btn-end-ok" class="big-btn ghost" type="button">&hellip;</button></div>
+    </div>
+  </section>
+
+  <!-- Tap-to-unlock-audio veil. Browsers/WebView will not start audio without a gesture. -->
+  <section id="scr-tap" class="layer screen hidden">
+    <div class="screen-inner">
+      <p class="tap-line">tap to listen</p>
+    </div>
+  </section>
+
+</div>
+
+<script type="module" src="js/main.js"></script>
+</html>

@@ -1,0 +1,48 @@
+apply plugin: 'com.android.application'
+
+android {
+    namespace 'com.blackmoor.ninthloop'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.blackmoor.ninthloop"
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName "1.0"
+    }
+
+    signingConfigs {
+        release {
+            storeFile file(System.getenv('NINTHLOOP_KEYSTORE') ?: "${rootDir}/keystore/ninthloop.jks")
+            storePassword System.getenv('NINTHLOOP_STORE_PASS') ?: 'ninthloop'
+            keyAlias System.getenv('NINTHLOOP_KEY_ALIAS') ?: 'ninthloop'
+            keyPassword System.getenv('NINTHLOOP_KEY_PASS') ?: 'ninthloop'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+        debug {
+            applicationIdSuffix ".debug"
+        }
+    }
+
+    // Audio assets are already Vorbis-compressed; re-zipping them wastes build time
+    // and gains nothing.
+    androidResources {
+        noCompress 'ogg'
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        abortOnError false
+    }
+}

@@ -1,0 +1,19 @@
+# Build output
+android/build/
+android/app/build/
+android/.gradle/
+android/local.properties
+
+# Signing material never belongs in the repo; build.sh generates a local one.
+android/keystore/
+
+# Test artefacts
+dist/shots/
+
+# Node (only used by the headless test harness)
+node_modules/
+package-lock.json
+
+# Python
+__pycache__/
+*.pyc
