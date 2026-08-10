@@ -15,9 +15,14 @@ add_library(hollowsignal SHARED
     game.cpp
     gfx.cpp
     world.cpp
-    entity.cpp
+    actors.cpp
+    missions.cpp
     player.cpp
-    audio.cpp)
+    audio.cpp
+    speech.cpp
+    assets.cpp
+    jnibridge.cpp
+    pak_verify.c)
 
 target_compile_options(hollowsignal PRIVATE
     -Wall

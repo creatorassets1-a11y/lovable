@@ -1,245 +1,534 @@
 #include "world.h"
+#include "noise.h"
 #include <queue>
 
 namespace hm {
 
-static const ChapterSpec kChapters[CHAPTER_COUNT] = {
-    // Later episodes are bigger, which on its own makes them calmer - there is
-    // more map to hide in. The aggression ramp is raised to compensate so the
-    // finale is the tightest chapter rather than the most spacious one.
-    // title              subtitle                        noun     seed   W   H  obj rooms lightD spd hear  aggr    fogD fogColor              wallTint
-    {"THE BASEMENT",     "EPISODE ONE",                  "FUSE",  1337u, 25, 25, 4,  10, 0.55f, 2.05f, 11.0f, 0.006f, 0.085f, {0.02f,0.02f,0.03f}, {0.44f,0.42f,0.38f}},
-    {"THE WARD",         "EPISODE TWO",                  "CHART", 2711u, 29, 29, 5,  14, 0.42f, 2.25f, 13.0f, 0.009f, 0.100f, {0.03f,0.03f,0.03f}, {0.52f,0.53f,0.48f}},
-    {"SUBLEVEL C",       "EPISODE THREE",                "CELL",  9091u, 31, 31, 5,  12, 0.32f, 2.45f, 15.0f, 0.013f, 0.115f, {0.02f,0.02f,0.02f}, {0.36f,0.35f,0.34f}},
-    {"THE TUNNELS",      "EPISODE FOUR",                 "VALVE", 4423u, 35, 35, 6,   8, 0.24f, 2.65f, 17.0f, 0.018f, 0.140f, {0.01f,0.02f,0.02f}, {0.30f,0.31f,0.29f}},
-    {"THE BROADCAST",    "EPISODE FIVE - SIGNAL FOUND",  "RELAY", 8081u, 37, 37, 6,  16, 0.18f, 2.90f, 20.0f, 0.024f, 0.155f, {0.02f,0.01f,0.01f}, {0.34f,0.28f,0.27f}},
-};
-
-const ChapterSpec& chapterSpec(int index) {
-    if (index < 0) index = 0;
-    if (index >= CHAPTER_COUNT) index = CHAPTER_COUNT - 1;
-    return kChapters[index];
-}
+// Block period: 18 cells of block, 4 cells of road, at 2m per cell. That gives
+// 36m blocks and 8m streets, which reads as a real city at walking pace.
+static const int BLOCK = 18;
+static const int ROAD = 4;
+static const int PERIOD = BLOCK + ROAD;
 
 // ---------------------------------------------------------------- generation
 
-void World::carveMaze(Rng& rng) {
-    // Recursive backtracker over odd coordinates.
-    std::vector<int> stack;
-    int sx = 1, sz = 1;
-    cells[sz * W + sx] = CELL_FLOOR;
-    stack.push_back(sz * W + sx);
+void World::layStreets(Rng& rng) {
+    // Everything starts as building mass and the streets are cut out of it.
+    cells.assign(W * H, CELL_SOLID);
+    groundMat.assign(W * H, MAT_CONCRETE);
+    buildingOf.assign(W * H, 0xFFFF);
 
-    const int dx[4] = {2, -2, 0, 0};
-    const int dz[4] = {0, 0, 2, -2};
-
-    while (!stack.empty()) {
-        int cur = stack.back();
-        int cx = cur % W, cz = cur / W;
-
-        int order[4] = {0, 1, 2, 3};
-        for (int i = 3; i > 0; i--) {
-            int j = rng.rangei(0, i + 1);
-            std::swap(order[i], order[j]);
+    for (int z = 0; z < H; z++) {
+        for (int x = 0; x < W; x++) {
+            int bx = x % PERIOD, bz = z % PERIOD;
+            bool roadX = bx >= BLOCK;
+            bool roadZ = bz >= BLOCK;
+            if (roadX || roadZ) {
+                cells[z * W + x] = CELL_ROAD;
+                // Centre line only down the middle lane of a straight run.
+                bool centreX = roadX && (bx == BLOCK + ROAD / 2) && !roadZ;
+                bool centreZ = roadZ && (bz == BLOCK + ROAD / 2) && !roadX;
+                groundMat[z * W + x] = (centreX || centreZ) ? MAT_ROADLINE : MAT_ASPHALT;
+            }
         }
-
-        bool moved = false;
-        for (int k = 0; k < 4; k++) {
-            int d = order[k];
-            int nx = cx + dx[d], nz = cz + dz[d];
-            if (nx <= 0 || nz <= 0 || nx >= W - 1 || nz >= H - 1) continue;
-            if (cells[nz * W + nx] != CELL_SOLID) continue;
-            // Knock out the wall between.
-            cells[(cz + dz[d] / 2) * W + (cx + dx[d] / 2)] = CELL_FLOOR;
-            cells[nz * W + nx] = CELL_FLOOR;
-            stack.push_back(nz * W + nx);
-            moved = true;
-            break;
-        }
-        if (!moved) stack.pop_back();
     }
+
+    // Pavement ring inside each block edge.
+    for (int z = 0; z < H; z++) {
+        for (int x = 0; x < W; x++) {
+            if (cells[z * W + x] != CELL_SOLID) continue;
+            int bx = x % PERIOD, bz = z % PERIOD;
+            if (bx == 0 || bx == BLOCK - 1 || bz == 0 || bz == BLOCK - 1) {
+                cells[z * W + x] = CELL_SIDEWALK;
+                groundMat[z * W + x] = MAT_SIDEWALK;
+            }
+        }
+    }
+    // Seal the district border now rather than after the buildings go in.
+    // Doing it last used to let a building on the edge of the map put its only
+    // door on row 0, which was then walled off - sealing the whole interior
+    // behind a door that opened into solid rock.
+    for (int x = 0; x < W; x++) {
+        cells[x] = CELL_SOLID;
+        cells[(H - 1) * W + x] = CELL_SOLID;
+    }
+    for (int z = 0; z < H; z++) {
+        cells[z * W] = CELL_SOLID;
+        cells[z * W + W - 1] = CELL_SOLID;
+    }
+    (void)rng;
 }
 
-void World::carveRooms(Rng& rng, int attempts) {
-    for (int i = 0; i < attempts; i++) {
-        int rw = rng.rangei(3, 8);
-        int rh = rng.rangei(3, 8);
-        int rx = rng.rangei(1, std::max(2, W - rw - 1));
-        int rz = rng.rangei(1, std::max(2, H - rh - 1));
-        for (int z = rz; z < rz + rh && z < H - 1; z++) {
-            for (int x = rx; x < rx + rw && x < W - 1; x++) {
-                cells[z * W + x] = CELL_FLOOR;
+void World::placeBuildings(Rng& rng) {
+    int blocksX = (W + PERIOD - 1) / PERIOD;
+    int blocksZ = (H + PERIOD - 1) / PERIOD;
+
+    for (int bz = 0; bz < blocksZ; bz++) {
+        for (int bx = 0; bx < blocksX; bx++) {
+            int x0 = bx * PERIOD + 1;
+            int z0 = bz * PERIOD + 1;
+            int x1 = std::min(x0 + BLOCK - 3, W - 2);
+            int z1 = std::min(z0 + BLOCK - 3, H - 2);
+            if (x1 - x0 < 4 || z1 - z0 < 4) continue;
+
+            float roll = rng.f01();
+            if (roll < 0.16f) {
+                // Empty lot: gravel, weeds, and a fence line implied by props.
+                for (int z = z0; z <= z1; z++)
+                    for (int x = x0; x <= x1; x++) {
+                        cells[z * W + x] = CELL_LOT;
+                        groundMat[z * W + x] = (rng.f01() < 0.45f) ? MAT_WEEDS : MAT_GRAVEL;
+                    }
+                continue;
+            }
+
+            // Otherwise one or two buildings sharing the block.
+            int splits = (roll < 0.55f) ? 1 : 2;
+            for (int s = 0; s < splits; s++) {
+                int sx0 = x0, sx1 = x1, sz0 = z0, sz1 = z1;
+                if (splits == 2) {
+                    int mid = (x0 + x1) / 2;
+                    if (s == 0) sx1 = mid - 1;
+                    else sx0 = mid + 1;
+                }
+                if (sx1 - sx0 < 4 || sz1 - sz0 < 4) continue;
+
+                Building b;
+                b.x0 = sx0; b.z0 = sz0; b.x1 = sx1; b.z1 = sz1;
+                b.height = rng.range(1.0f, 6.0f) * 3.6f + 0.8f;
+                b.enterable = rng.f01() < 0.42f;
+                b.doorCX = b.doorCZ = -1;
+                float wr = rng.f01();
+                b.wallMat = (wr < 0.45f) ? MAT_BRICK
+                          : (wr < 0.75f) ? MAT_CONCRETE
+                          : (wr < 0.90f) ? MAT_CORRUGATED : MAT_PLASTER;
+                b.floorMat = (rng.f01() < 0.5f) ? MAT_TILE : MAT_DEBRIS;
+
+                uint16_t id = (uint16_t)buildings.size();
+                for (int z = sz0; z <= sz1; z++)
+                    for (int x = sx0; x <= sx1; x++) {
+                        cells[z * W + x] = CELL_SOLID;
+                        buildingOf[z * W + x] = id;
+                    }
+                buildings.push_back(b);
+                if (buildings.back().enterable) carveInterior(buildings.back(), rng);
             }
         }
     }
 }
 
-void World::openLoops(Rng& rng, int count) {
-    // A perfect maze is tedious, not frightening: you always know the way back.
-    // Punching loops means the stalker can come from behind you.
-    int made = 0, guard = 0;
-    while (made < count && guard++ < count * 60) {
-        int x = rng.rangei(1, W - 1);
-        int z = rng.rangei(1, H - 1);
-        if (cells[z * W + x] != CELL_SOLID) continue;
-        bool horiz = at(x - 1, z) != CELL_SOLID && at(x + 1, z) != CELL_SOLID;
-        bool vert  = at(x, z - 1) != CELL_SOLID && at(x, z + 1) != CELL_SOLID;
-        if (horiz != vert) {  // exactly one axis is a corridor pair
-            cells[z * W + x] = CELL_DOOR;
-            made++;
+// Binary space partition of the footprint into rooms, then knock doorways
+// between neighbours so the interior is fully connected, then one street door.
+void World::carveInterior(Building& b, Rng& rng) {
+    int ix0 = b.x0 + 1, iz0 = b.z0 + 1, ix1 = b.x1 - 1, iz1 = b.z1 - 1;
+    // Too small to hold rooms. Nothing has been carved yet, so it simply stays
+    // a solid block.
+    if (ix1 - ix0 < 3 || iz1 - iz0 < 3) { b.enterable = false; return; }
+
+    struct Room { int x0, z0, x1, z1; };
+    std::vector<Room> rooms;
+    std::vector<Room> queue;
+    queue.push_back({ix0, iz0, ix1, iz1});
+
+    while (!queue.empty()) {
+        Room r = queue.back();
+        queue.pop_back();
+        int w = r.x1 - r.x0 + 1, h = r.z1 - r.z0 + 1;
+        // Stop splitting when a room is small enough to feel like a room.
+        if ((w <= 7 && h <= 7) || rooms.size() > 10 || w < 4 || h < 4) {
+            rooms.push_back(r);
+            continue;
+        }
+        bool splitX = (w > h) ? true : (h > w ? false : rng.f01() < 0.5f);
+        if (splitX) {
+            int cut = r.x0 + 2 + rng.rangei(1, std::max(2, w - 4));
+            if (cut <= r.x0 + 1 || cut >= r.x1 - 1) { rooms.push_back(r); continue; }
+            queue.push_back({r.x0, r.z0, cut - 1, r.z1});
+            queue.push_back({cut + 1, r.z0, r.x1, r.z1});
+            for (int z = r.z0; z <= r.z1; z++) cells[z * W + cut] = CELL_SOLID;
+        } else {
+            int cut = r.z0 + 2 + rng.rangei(1, std::max(2, h - 4));
+            if (cut <= r.z0 + 1 || cut >= r.z1 - 1) { rooms.push_back(r); continue; }
+            queue.push_back({r.x0, r.z0, r.x1, cut - 1});
+            queue.push_back({r.x0, cut + 1, r.x1, r.z1});
+            for (int x = r.x0; x <= r.x1; x++) cells[cut * W + x] = CELL_SOLID;
         }
     }
-}
 
-void World::placeContent(Rng& rng, const ChapterSpec& spec) {
-    // Distance field from the top-left region, used to place the exit far away
-    // and to spread objectives across the whole map rather than one corner.
-    std::vector<int> dist(W * H, -1);
-    int startIdx = -1;
-    for (int z = 1; z < H - 1 && startIdx < 0; z++)
-        for (int x = 1; x < W - 1 && startIdx < 0; x++)
-            if (cells[z * W + x] != CELL_SOLID) startIdx = z * W + x;
-    if (startIdx < 0) return;
+    for (const Room& r : rooms) {
+        for (int z = r.z0; z <= r.z1; z++)
+            for (int x = r.x0; x <= r.x1; x++) {
+                if (!inBounds(x, z)) continue;
+                cells[z * W + x] = CELL_INTERIOR;
+                groundMat[z * W + x] = b.floorMat;
+            }
+    }
 
+    // Connect the rooms: for every interior wall cell with interior on both
+    // sides, open some of them. Then verify connectivity and force more open
+    // if the flood fill does not reach everything.
+    for (int pass = 0; pass < 6; pass++) {
+        int opened = 0;
+        for (int z = iz0; z <= iz1; z++) {
+            for (int x = ix0; x <= ix1; x++) {
+                if (cells[z * W + x] != CELL_SOLID) continue;
+                bool horiz = at(x - 1, z) == CELL_INTERIOR && at(x + 1, z) == CELL_INTERIOR;
+                bool vert = at(x, z - 1) == CELL_INTERIOR && at(x, z + 1) == CELL_INTERIOR;
+                if (horiz == vert) continue;
+                if (rng.f01() > (pass == 0 ? 0.30f : 0.55f)) continue;
+                cells[z * W + x] = CELL_INTERIOR;
+                groundMat[z * W + x] = b.floorMat;
+                opened++;
+            }
+        }
+        if (pass > 0 && opened == 0) break;
+    }
+
+    // Street door: pick a footprint edge cell that has open ground outside it.
+    struct Cand { int x, z, ox, oz; };
+    std::vector<Cand> cands;
+    for (int x = b.x0; x <= b.x1; x++) {
+        if (at(x, b.z0 + 1) == CELL_INTERIOR && cellWalkable(at(x, b.z0 - 1)))
+            cands.push_back({x, b.z0, x, b.z0 - 1});
+        if (at(x, b.z1 - 1) == CELL_INTERIOR && cellWalkable(at(x, b.z1 + 1)))
+            cands.push_back({x, b.z1, x, b.z1 + 1});
+    }
+    for (int z = b.z0; z <= b.z1; z++) {
+        if (at(b.x0 + 1, z) == CELL_INTERIOR && cellWalkable(at(b.x0 - 1, z)))
+            cands.push_back({b.x0, z, b.x0 - 1, z});
+        if (at(b.x1 - 1, z) == CELL_INTERIOR && cellWalkable(at(b.x1 + 1, z)))
+            cands.push_back({b.x1, z, b.x1 + 1, z});
+    }
+    if (cands.empty()) {
+        // No wall of this footprint faces open ground, so there is nowhere to
+        // put a door. Fill the rooms back in rather than leaving a sealed void:
+        // carved-but-unreachable interior is invisible from outside and shows
+        // up only as cells the player can never stand on.
+        b.enterable = false;
+        uint16_t id = (uint16_t)(&b - buildings.data());
+        for (int z = b.z0; z <= b.z1; z++)
+            for (int x = b.x0; x <= b.x1; x++) {
+                if (!inBounds(x, z)) continue;
+                cells[z * W + x] = CELL_SOLID;
+                buildingOf[z * W + x] = id;
+            }
+        return;
+    }
+    const Cand& c = cands[rng.rangei(0, (int)cands.size())];
+    cells[c.z * W + c.x] = CELL_DOORWAY;
+    groundMat[c.z * W + c.x] = b.floorMat;
+    b.doorCX = c.x;
+    b.doorCZ = c.z;
+    b.doorPos = cellCenter(c.x, c.z);
+
+    // Guarantee the whole interior is reachable from the door. Anything the
+    // flood fill misses gets walled back off, so there are no rooms the player
+    // can see into and never enter.
+    std::vector<uint8_t> seen((size_t)(b.x1 - b.x0 + 1) * (b.z1 - b.z0 + 1), 0);
+    auto idx = [&](int x, int z) { return (z - b.z0) * (b.x1 - b.x0 + 1) + (x - b.x0); };
     std::queue<int> q;
-    dist[startIdx] = 0;
-    q.push(startIdx);
-    int farIdx = startIdx;
+    q.push(c.z * W + c.x);
+    seen[idx(c.x, c.z)] = 1;
     while (!q.empty()) {
         int cur = q.front(); q.pop();
-        if (dist[cur] > dist[farIdx]) farIdx = cur;
         int cx = cur % W, cz = cur / W;
         const int dx[4] = {1, -1, 0, 0}, dz[4] = {0, 0, 1, -1};
         for (int d = 0; d < 4; d++) {
             int nx = cx + dx[d], nz = cz + dz[d];
-            if (!inBounds(nx, nz) || cells[nz * W + nx] == CELL_SOLID) continue;
-            if (dist[nz * W + nx] >= 0) continue;
-            dist[nz * W + nx] = dist[cur] + 1;
+            if (nx < b.x0 || nx > b.x1 || nz < b.z0 || nz > b.z1) continue;
+            if (!cellIndoor(at(nx, nz))) continue;
+            if (seen[idx(nx, nz)]) continue;
+            seen[idx(nx, nz)] = 1;
             q.push(nz * W + nx);
         }
     }
+    for (int z = b.z0; z <= b.z1; z++)
+        for (int x = b.x0; x <= b.x1; x++)
+            if (cellIndoor(at(x, z)) && !seen[idx(x, z)]) {
+                cells[z * W + x] = CELL_SOLID;
+                buildingOf[z * W + x] = (uint16_t)(&b - buildings.data());
+            }
+}
 
-    playerStart = cellCenter(startIdx % W, startIdx / W);
-    exitCX = farIdx % W;
-    exitCZ = farIdx / W;
-    exitPos = cellCenter(exitCX, exitCZ);
+void World::placeLightsAndProps(Rng& rng) {
+    // Street lights on the pavement at regular intervals: most are dead, which
+    // is the point - the ones still working become islands you move between.
+    for (int z = 0; z < H; z++) {
+        for (int x = 0; x < W; x++) {
+            if (cells[z * W + x] != CELL_SIDEWALK) continue;
+            int bx = x % PERIOD, bz = z % PERIOD;
+            bool corner = (bx == 0 || bx == BLOCK - 1) && (bz == 0 || bz == BLOCK - 1);
+            if (corner) continue;
+            if ((x % 9 != 0) && (z % 9 != 0)) continue;
+            if (rng.f01() > 0.55f) continue;
 
-    int maxD = dist[farIdx];
-    if (maxD < 1) maxD = 1;
+            Prop p;
+            p.pos = cellCenter(x, z);
+            p.yaw = 0.0f;
+            p.kind = 0;   // lamp post
+            props.push_back(p);
 
-    // Objectives: one per distance band, so you are forced to cross the map.
-    for (int i = 0; i < spec.objectiveCount; i++) {
-        int loD = (int)(maxD * (0.25f + 0.65f * i / (float)spec.objectiveCount));
-        int hiD = (int)(maxD * (0.25f + 0.65f * (i + 1) / (float)spec.objectiveCount));
-        std::vector<int> band;
-        for (int c = 0; c < W * H; c++)
-            if (dist[c] >= loD && dist[c] <= hiD) band.push_back(c);
-        if (band.empty()) {
-            for (int c = 0; c < W * H; c++) if (dist[c] > 0) band.push_back(c);
+            if (rng.f01() < 0.42f) {
+                LightSrc L;
+                L.pos = cellCenter(x, z) + vec3(0, 5.2f, 0);
+                L.color = vec3(0.98f, 0.76f, 0.44f);
+                L.radius = rng.range(9.0f, 15.0f);
+                L.flicker = rng.f01() < 0.45f ? rng.range(0.3f, 1.0f) : 0.0f;
+                L.phase = rng.range(0.0f, TAU);
+                L.indoor = false;
+                lights.push_back(L);
+            }
         }
-        if (band.empty()) continue;
-        int pick = band[rng.rangei(0, (int)band.size())];
-        Pickup p;
-        p.pos = cellCenter(pick % W, pick / W);
-        p.pos.y = 0.75f;
-        p.bob = rng.range(0.0f, TAU);
-        pickups.push_back(p);
     }
 
-    // Lights at junctions and open rooms.
+    // Interior lights: one per few interior cells, sicklier than the street.
     for (int z = 1; z < H - 1; z++) {
         for (int x = 1; x < W - 1; x++) {
-            if (cells[z * W + x] == CELL_SOLID) continue;
-            int open = 0;
-            for (int d = 0; d < 4; d++) {
-                const int dx[4] = {1, -1, 0, 0}, dz[4] = {0, 0, 1, -1};
-                if (at(x + dx[d], z + dz[d]) != CELL_SOLID) open++;
-            }
-            if (open < 3) continue;
-            if (rng.f01() > spec.lightDensity) continue;
+            if (cells[z * W + x] != CELL_INTERIOR) continue;
+            if (rng.f01() > 0.045f) continue;
             LightSrc L;
-            L.pos = cellCenter(x, z);
-            L.pos.y = wallHeight - 0.35f;
-            // Sodium-ish, sickly. Occasional dying green one.
-            bool bad = rng.f01() < 0.25f;
-            L.color = bad ? vec3(0.35f, 0.55f, 0.40f) : vec3(0.95f, 0.78f, 0.52f);
+            L.pos = cellCenter(x, z) + vec3(0, interiorHeight - 0.25f, 0);
+            bool bad = rng.f01() < 0.35f;
+            L.color = bad ? vec3(0.40f, 0.58f, 0.44f) : vec3(0.92f, 0.80f, 0.58f);
             L.radius = rng.range(5.0f, 8.5f);
-            L.flicker = rng.f01() < 0.4f ? rng.range(0.3f, 1.0f) : 0.0f;
+            L.flicker = rng.f01() < 0.5f ? rng.range(0.35f, 1.0f) : 0.0f;
             L.phase = rng.range(0.0f, TAU);
+            L.indoor = true;
             lights.push_back(L);
         }
     }
 
-    // Props hugging walls, so corridors stay navigable but read as lived-in.
+    // Street clutter and interior furniture.
     for (int z = 1; z < H - 1; z++) {
         for (int x = 1; x < W - 1; x++) {
-            if (cells[z * W + x] == CELL_SOLID) continue;
-            if (rng.f01() > 0.16f) continue;
-            int wallDir = -1;
-            const int dx[4] = {1, -1, 0, 0}, dz[4] = {0, 0, 1, -1};
-            for (int d = 0; d < 4; d++)
-                if (at(x + dx[d], z + dz[d]) == CELL_SOLID) { wallDir = d; break; }
-            if (wallDir < 0) continue;
-            Prop pr;
-            pr.pos = cellCenter(x, z) + vec3(dx[wallDir] * cellSize * 0.32f, 0.0f, dz[wallDir] * cellSize * 0.32f);
-            pr.yaw = rng.range(0.0f, TAU);
-            pr.kind = rng.rangei(0, 5);
-            props.push_back(pr);
+            uint8_t c = cells[z * W + x];
+            if (!cellWalkable(c)) continue;
+
+            float chance = (c == CELL_ROAD) ? 0.020f
+                         : (c == CELL_SIDEWALK) ? 0.055f
+                         : (c == CELL_LOT) ? 0.10f
+                         : (c == CELL_INTERIOR) ? 0.10f : 0.0f;
+            if (rng.f01() > chance) continue;
+
+            // Keep the middle of the road clear so it stays readable as a route.
+            bool nextToWall = solid(x + 1, z) || solid(x - 1, z) ||
+                              solid(x, z + 1) || solid(x, z - 1);
+            if (c == CELL_ROAD && !nextToWall && rng.f01() < 0.7f) continue;
+
+            Prop p;
+            p.pos = cellCenter(x, z);
+            p.yaw = rng.range(0.0f, TAU);
+            if (c == CELL_ROAD) {
+                p.kind = 1;                                  // wrecked car
+            } else if (c == CELL_SIDEWALK) {
+                p.kind = rng.f01() < 0.5f ? 2 : 3;           // bin, barrier
+            } else if (c == CELL_LOT) {
+                p.kind = rng.f01() < 0.4f ? 4 : (rng.f01() < 0.5f ? 5 : 2);  // pallet, rubble
+            } else {
+                p.kind = 6 + rng.rangei(0, 4);               // interior furniture
+            }
+            props.push_back(p);
         }
     }
 }
 
-void World::generate(const ChapterSpec& spec) {
-    W = spec.gridW | 1;   // maze algorithm needs odd dimensions
-    H = spec.gridH | 1;
-    cells.assign(W * H, CELL_SOLID);
+void World::generate(uint32_t seed, int gridW, int gridH) {
+    W = gridW;
+    H = gridH;
+    buildings.clear();
     lights.clear();
-    pickups.clear();
     props.clear();
 
-    Rng rng(spec.seed);
-    carveMaze(rng);
-    carveRooms(rng, spec.roomAttempts);
-    openLoops(rng, (W * H) / 40);
+    Rng rng(seed ? seed : 1u);
+    layStreets(rng);
+    placeBuildings(rng);
+    placeLightsAndProps(rng);
 
-    // Seal the border no matter what the room carver did.
-    for (int x = 0; x < W; x++) { cells[x] = CELL_SOLID; cells[(H - 1) * W + x] = CELL_SOLID; }
-    for (int z = 0; z < H; z++) { cells[z * W] = CELL_SOLID; cells[z * W + W - 1] = CELL_SOLID; }
-
-    placeContent(rng, spec);
-    flow.assign(W * H, FLOW_INF);
+    // Spawn on a road near the middle.
+    Rng srng(seed * 7919u + 13u);
+    vec3 mid((W * 0.5f) * cellSize, 0, (H * 0.5f) * cellSize);
+    if (!findOpenNear(mid, 40.0f, playerStart, srng)) {
+        for (int z = 1; z < H - 1 && playerStart.x == 0.0f; z++)
+            for (int x = 1; x < W - 1; x++)
+                if (cells[z * W + x] == CELL_ROAD) { playerStart = cellCenter(x, z); break; }
+    }
+    flow.assign((size_t)W * H, FLOW_INF);
 }
 
-// -------------------------------------------------------------------- meshing
+bool World::findOpenNear(const vec3& near, float maxRadius, vec3& out, Rng& rng) const {
+    int cx, cz;
+    worldToCell(near, cx, cz);
+    int maxCells = (int)(maxRadius / cellSize);
+    for (int tries = 0; tries < 400; tries++) {
+        int r = rng.rangei(0, std::max(1, maxCells));
+        float a = rng.range(0.0f, TAU);
+        int x = cx + (int)(std::cos(a) * r);
+        int z = cz + (int)(std::sin(a) * r);
+        if (!inBounds(x, z) || solid(x, z)) continue;
+        out = cellCenter(x, z);
+        return true;
+    }
+    // Deterministic fallback: spiral outward.
+    for (int r = 0; r < maxCells; r++) {
+        for (int dz = -r; dz <= r; dz++) {
+            for (int dx = -r; dx <= r; dx++) {
+                if (std::max(std::abs(dx), std::abs(dz)) != r) continue;
+                int x = cx + dx, z = cz + dz;
+                if (!inBounds(x, z) || solid(x, z)) continue;
+                out = cellCenter(x, z);
+                return true;
+            }
+        }
+    }
+    return false;
+}
 
-void World::buildMesh(Mesh& out) const {
+// ------------------------------------------------------------------- meshing
+
+// Cheap ambient occlusion: a vertex sitting in a corner where several
+// neighbouring cells are solid gets darkened. It costs nothing at runtime and
+// does more for the sense of solidity than another light would.
+static float cornerAO(const World& w, int x, int z, int dx, int dz) {
+    int a = w.solid(x + dx, z) ? 1 : 0;
+    int b = w.solid(x, z + dz) ? 1 : 0;
+    int c = w.solid(x + dx, z + dz) ? 1 : 0;
+    int n = a + b + ((a && b) ? 1 : c);
+    return 1.0f - n * 0.16f;
+}
+
+void World::buildChunks(std::vector<Chunk>& out, int chunkCells) const {
     out.clear();
-    const float uvScale = 0.45f;   // texture repeats roughly every 2.2m
+    int nx = (W + chunkCells - 1) / chunkCells;
+    int nz = (H + chunkCells - 1) / chunkCells;
     const float cs = cellSize;
+    const float uvScale = 0.42f;
 
-    for (int z = 0; z < H; z++) {
-        for (int x = 0; x < W; x++) {
-            if (cells[z * W + x] == CELL_SOLID) continue;
-            float x0 = x * cs, x1 = x0 + cs;
-            float z0 = z * cs, z1 = z0 + cs;
-            float uv = cs * uvScale;
+    for (int cz = 0; cz < nz; cz++) {
+        for (int cx = 0; cx < nx; cx++) {
+            Chunk chunk;
+            chunk.cx = cx;
+            chunk.cz = cz;
+            int x0 = cx * chunkCells, x1 = std::min(W, x0 + chunkCells);
+            int z0 = cz * chunkCells, z1 = std::min(H, z0 + chunkCells);
+            float maxY = 0.5f;
 
-            // Floor (facing up) and ceiling (facing down).
-            out.quad({x0, 0, z1}, {x1, 0, z1}, {x1, 0, z0}, {x0, 0, z0}, uv, uv);
-            out.quad({x0, wallHeight, z0}, {x1, wallHeight, z0},
-                     {x1, wallHeight, z1}, {x0, wallHeight, z1}, uv, uv);
+            for (int z = z0; z < z1; z++) {
+                for (int x = x0; x < x1; x++) {
+                    uint8_t c = cells[z * W + x];
+                    if (!cellWalkable(c)) continue;
+                    float fx0 = x * cs, fx1 = fx0 + cs;
+                    float fz0 = z * cs, fz1 = fz0 + cs;
+                    float uv = cs * uvScale;
+                    float gm = (float)groundMat[z * W + x];
 
-            float h = wallHeight;
-            float uvh = h * uvScale;
-            // Only emit a wall where the neighbour is solid: no hidden faces.
-            if (at(x + 1, z) == CELL_SOLID)
-                out.quad({x1, 0, z0}, {x1, 0, z1}, {x1, h, z1}, {x1, h, z0}, uv, uvh);
-            if (at(x - 1, z) == CELL_SOLID)
-                out.quad({x0, 0, z1}, {x0, 0, z0}, {x0, h, z0}, {x0, h, z1}, uv, uvh);
-            if (at(x, z + 1) == CELL_SOLID)
-                out.quad({x1, 0, z1}, {x0, 0, z1}, {x0, h, z1}, {x1, h, z1}, uv, uvh);
-            if (at(x, z - 1) == CELL_SOLID)
-                out.quad({x0, 0, z0}, {x1, 0, z0}, {x1, h, z0}, {x0, h, z0}, uv, uvh);
+                    float a00 = cornerAO(*this, x, z, -1, -1);
+                    float a10 = cornerAO(*this, x, z, 1, -1);
+                    float a11 = cornerAO(*this, x, z, 1, 1);
+                    float a01 = cornerAO(*this, x, z, -1, 1);
+
+                    // Floor.
+                    chunk.mesh.quad({fx0, 0, fz1}, {fx1, 0, fz1}, {fx1, 0, fz0}, {fx0, 0, fz0},
+                                    gm, uv, uv, a01, a11, a10, a00);
+
+                    // Ceiling, indoors only.
+                    if (cellIndoor(c)) {
+                        float h = interiorHeight;
+                        chunk.mesh.quad({fx0, h, fz0}, {fx1, h, fz0}, {fx1, h, fz1}, {fx0, h, fz1},
+                                        (float)MAT_CEILING, uv, uv);
+                        maxY = std::max(maxY, h);
+                    }
+
+                    // Walls: emitted from the walkable side, so no hidden faces.
+                    const int dxs[4] = {1, -1, 0, 0};
+                    const int dzs[4] = {0, 0, 1, -1};
+                    for (int d = 0; d < 4; d++) {
+                        int wx = x + dxs[d], wz = z + dzs[d];
+                        if (!solid(wx, wz)) continue;
+
+                        // How tall this face is: indoors it stops at the
+                        // ceiling, outdoors it runs to the top of the building.
+                        float wallH = interiorHeight;
+                        int wallMat = MAT_PLASTER;
+                        if (!cellIndoor(c)) {
+                            uint16_t bid = inBounds(wx, wz) ? buildingOf[wz * W + wx] : 0xFFFF;
+                            if (bid != 0xFFFF && bid < buildings.size()) {
+                                wallH = buildings[bid].height;
+                                wallMat = buildings[bid].wallMat;
+                            } else {
+                                wallH = 4.5f;
+                                wallMat = MAT_CONCRETE;
+                            }
+                        } else {
+                            uint16_t bid = inBounds(wx, wz) ? buildingOf[wz * W + wx] : 0xFFFF;
+                            if (bid != 0xFFFF && bid < buildings.size())
+                                wallMat = buildings[bid].wallMat == MAT_CORRUGATED
+                                        ? MAT_CORRUGATED : MAT_PLASTER;
+                        }
+                        maxY = std::max(maxY, wallH);
+                        float uvh = wallH * uvScale;
+
+                        if (d == 0)
+                            chunk.mesh.quad({fx1, 0, fz0}, {fx1, 0, fz1}, {fx1, wallH, fz1}, {fx1, wallH, fz0},
+                                            (float)wallMat, uv, uvh, 0.72f, 0.72f, 1.0f, 1.0f);
+                        else if (d == 1)
+                            chunk.mesh.quad({fx0, 0, fz1}, {fx0, 0, fz0}, {fx0, wallH, fz0}, {fx0, wallH, fz1},
+                                            (float)wallMat, uv, uvh, 0.72f, 0.72f, 1.0f, 1.0f);
+                        else if (d == 2)
+                            chunk.mesh.quad({fx1, 0, fz1}, {fx0, 0, fz1}, {fx0, wallH, fz1}, {fx1, wallH, fz1},
+                                            (float)wallMat, uv, uvh, 0.72f, 0.72f, 1.0f, 1.0f);
+                        else
+                            chunk.mesh.quad({fx0, 0, fz0}, {fx1, 0, fz0}, {fx1, wallH, fz0}, {fx0, wallH, fz0},
+                                            (float)wallMat, uv, uvh, 0.72f, 0.72f, 1.0f, 1.0f);
+
+                        // Windows: a band of glass on the upper floors of the
+                        // outward faces, so the skyline is not blank masonry.
+                        if (!cellIndoor(c) && wallH > 6.0f) {
+                            for (int storey = 1; storey * 3.6f + 2.6f < wallH; storey++) {
+                                float wy0 = storey * 3.6f + 0.9f;
+                                float wy1 = wy0 + 1.5f;
+                                float eps = 0.02f;
+                                if (d == 0)
+                                    chunk.mesh.quad({fx1 + eps, wy0, fz0 + 0.3f}, {fx1 + eps, wy0, fz1 - 0.3f},
+                                                    {fx1 + eps, wy1, fz1 - 0.3f}, {fx1 + eps, wy1, fz0 + 0.3f},
+                                                    (float)MAT_WINDOW, 1.0f, 1.0f);
+                                else if (d == 1)
+                                    chunk.mesh.quad({fx0 - eps, wy0, fz1 - 0.3f}, {fx0 - eps, wy0, fz0 + 0.3f},
+                                                    {fx0 - eps, wy1, fz0 + 0.3f}, {fx0 - eps, wy1, fz1 - 0.3f},
+                                                    (float)MAT_WINDOW, 1.0f, 1.0f);
+                                else if (d == 2)
+                                    chunk.mesh.quad({fx1 - 0.3f, wy0, fz1 + eps}, {fx0 + 0.3f, wy0, fz1 + eps},
+                                                    {fx0 + 0.3f, wy1, fz1 + eps}, {fx1 - 0.3f, wy1, fz1 + eps},
+                                                    (float)MAT_WINDOW, 1.0f, 1.0f);
+                                else
+                                    chunk.mesh.quad({fx0 + 0.3f, wy0, fz0 - eps}, {fx1 - 0.3f, wy0, fz0 - eps},
+                                                    {fx1 - 0.3f, wy1, fz0 - eps}, {fx0 + 0.3f, wy1, fz0 - eps},
+                                                    (float)MAT_WINDOW, 1.0f, 1.0f);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Roofs: one quad per building cell whose neighbour is lower or
+            // open, which caps the silhouette without tiling the whole roof.
+            for (int z = z0; z < z1; z++) {
+                for (int x = x0; x < x1; x++) {
+                    if (cells[z * W + x] != CELL_SOLID) continue;
+                    uint16_t bid = buildingOf[z * W + x];
+                    if (bid == 0xFFFF || bid >= buildings.size()) continue;
+                    float h = buildings[bid].height;
+                    float fx0 = x * cs, fx1 = fx0 + cs;
+                    float fz0 = z * cs, fz1 = fz0 + cs;
+                    chunk.mesh.quad({fx0, h, fz1}, {fx1, h, fz1}, {fx1, h, fz0}, {fx0, h, fz0},
+                                    (float)MAT_RUSTMETAL, cs * uvScale, cs * uvScale);
+                    maxY = std::max(maxY, h);
+                }
+            }
+
+            if (chunk.mesh.empty()) continue;
+            chunk.mn = vec3(x0 * cs, 0.0f, z0 * cs);
+            chunk.mx = vec3(x1 * cs, maxY, z1 * cs);
+            out.push_back(std::move(chunk));
         }
     }
 }
@@ -249,9 +538,6 @@ void World::buildMesh(Mesh& out) const {
 vec3 World::resolveCollision(const vec3& desired, float radius) const {
     vec3 p = desired;
     int cx, cz;
-    worldToCell(p, cx, cz);
-    // Several passes: escaping one wall can push you into its neighbour, and a
-    // corner needs both faces resolved before the position settles.
     for (int pass = 0; pass < 4; pass++) {
         worldToCell(p, cx, cz);
         for (int dz = -1; dz <= 1; dz++) {
@@ -271,7 +557,6 @@ vec3 World::resolveCollision(const vec3& desired, float radius) const {
                     p.x += (ddx / d) * push;
                     p.z += (ddz / d) * push;
                 } else {
-                    // Dead centre of a wall cell: eject along the shallowest axis.
                     float toL = p.x - minX, toR = maxX - p.x;
                     float toB = p.z - minZ, toT = maxZ - p.z;
                     float m = std::min(std::min(toL, toR), std::min(toB, toT));
@@ -283,11 +568,6 @@ vec3 World::resolveCollision(const vec3& desired, float radius) const {
             }
         }
     }
-
-    // Safety net. Normal movement steps are far smaller than a cell so this
-    // never fires in play, but if anything ever does end up buried in geometry
-    // (a teleport, a regenerated level) we put it back on walkable ground
-    // instead of letting it fall through the world.
     worldToCell(p, cx, cz);
     if (solid(cx, cz)) {
         float bestD = 1e30f;
@@ -311,7 +591,6 @@ vec3 World::resolveCollision(const vec3& desired, float radius) const {
 }
 
 bool World::lineOfSight(const vec3& a, const vec3& b) const {
-    // Amanatides & Woo grid traversal.
     float x = a.x / cellSize, z = a.z / cellSize;
     float ex = b.x / cellSize, ez = b.z / cellSize;
     int cx = (int)std::floor(x), cz = (int)std::floor(z);
@@ -332,23 +611,17 @@ bool World::lineOfSight(const vec3& a, const vec3& b) const {
     float tDeltaZ = std::fabs(dz) < 1e-8f ? 1e30f : 1.0f / std::fabs(dz);
 
     int guard = 0;
-    while (guard++ < 1024) {
+    while (guard++ < 4096) {
         if (cx == endX && cz == endZ) return true;
-        // Distance at which the ray crosses into the next cell. If that is
-        // already past the endpoint we have arrived without hitting anything.
-        // (Testing tMax *after* stepping compares against the far side of the
-        // new cell instead, which lets sight leak through the last wall.)
         float tEnter = std::min(tMaxX, tMaxZ);
         if (tEnter > dist) return true;
 
         if (std::fabs(tMaxX - tMaxZ) < 1e-4f * std::max(1.0f, tEnter)) {
-            // The ray passes exactly through a cell corner. Stepping X-then-Z
-            // gives a different answer from Z-then-X, so sight becomes
-            // direction-dependent: the stalker could see you through a corner
-            // you cannot see through, which feels like cheating because it is.
-            // Treat the corner as blocked if either cell touching it is solid.
-            // That is symmetric, and it also stops sight slipping diagonally
-            // between two wall blocks that visually meet.
+            // Exact corner crossing. Stepping X-then-Z gives a different answer
+            // from Z-then-X, so sight would become direction-dependent: the
+            // creature could see you through a corner you cannot see through.
+            // Blocking when either cell touching the corner is solid is both
+            // symmetric and stops sight slipping diagonally between two walls.
             if (solid(cx + stepX, cz) || solid(cx, cz + stepZ)) return false;
             cx += stepX;
             cz += stepZ;
@@ -369,7 +642,7 @@ bool World::lineOfSight(const vec3& a, const vec3& b) const {
 // ----------------------------------------------------------------- navigation
 
 void World::computeFlow(int targetX, int targetZ) {
-    flow.assign(W * H, FLOW_INF);
+    flow.assign((size_t)W * H, FLOW_INF);
     if (!inBounds(targetX, targetZ) || solid(targetX, targetZ)) return;
 
     std::queue<int> q;
@@ -380,6 +653,7 @@ void World::computeFlow(int targetX, int targetZ) {
         int cur = q.front(); q.pop();
         int cx = cur % W, cz = cur / W;
         uint16_t nd = (uint16_t)(flow[cur] + 1);
+        if (nd == FLOW_INF) continue;
         for (int d = 0; d < 4; d++) {
             int nx = cx + dx[d], nz = cz + dz[d];
             if (!inBounds(nx, nz) || solid(nx, nz)) continue;

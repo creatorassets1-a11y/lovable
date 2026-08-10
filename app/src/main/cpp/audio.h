@@ -1,10 +1,16 @@
-// audio.h - real-time procedural audio. Every sound in this game is synthesised
-// sample-by-sample on the audio thread: no .wav files, no licensing, no bloat.
+// audio.h - real-time mixer.
 //
-// Threading contract: the game thread only ever calls post()/set*(); those write
-// into a lock-free SPSC ring or into atomics. The audio thread only reads.
+// Two sources feed it. Short interactive sounds (footsteps, impacts, monster
+// vocalisations) are synthesised sample-by-sample on the audio thread, because
+// they need to vary continuously with what the game is doing. Speech and the
+// long ambience beds are baked offline and streamed from the asset pack,
+// because they are too expensive to generate live and never need to vary.
+//
+// Threading contract: the game thread only calls post*/set*; those write into a
+// lock-free single-producer ring or into atomics. The audio thread only reads.
 #pragma once
 #include "hmath.h"
+#include "assets.h"
 #include <atomic>
 #include <vector>
 
@@ -17,6 +23,8 @@ enum SoundId : int {
     SND_STINGER,
     SND_SCREECH,
     SND_GROWL,
+    SND_CHITTER,
+    SND_WATCHER_CALL,
     SND_PICKUP,
     SND_DOOR,
     SND_FLASHLIGHT,
@@ -28,14 +36,23 @@ enum SoundId : int {
     SND_DEATH,
     SND_HEARTBEAT_THUMP,
     SND_BREATH,
+    SND_FLARE_FIRE,
+    SND_RADIO_BEEP,
+    // These resolve to baked samples chosen at random from a set of takes.
+    SND_NPC_HELP,
+    SND_NPC_SOB,
+    SND_NPC_RUN,
+    SND_NPC_FOLLOW,
     SND_COUNT
 };
 
 struct SoundEvent {
-    int id;
+    int id;          // SoundId for procedural, or -1 when `sample` is set
+    int sample;      // index into the sample table, -1 if procedural
     float x, y, z;
     float gain;
     float pitch;
+    uint8_t flags;   // 1 = non-positional, 2 = dialogue (ducks the bed)
 };
 
 class AudioEngine {
@@ -43,49 +60,82 @@ public:
     bool start();
     void stop();
 
-    // --- called from the game thread only ---
-    void post(SoundId id, const vec3& pos, float gain = 1.0f, float pitch = 1.0f);
-    void postUI(SoundId id, float gain = 1.0f, float pitch = 1.0f);  // non-positional
-    void setListener(const vec3& pos, const vec3& forward);
-    void setTension(float t)   { mTension.store(clampf(t, 0.0f, 1.0f)); }
-    void setHeartRate(float b) { mHeartBpm.store(clampf(b, 40.0f, 220.0f)); }
-    void setBreath(float b)    { mBreath.store(clampf(b, 0.0f, 1.0f)); }
-    void setMuffle(float m)    { mMuffle.store(clampf(m, 0.0f, 1.0f)); }
-    void setMasterGain(float g){ mMaster.store(clampf(g, 0.0f, 1.0f)); }
+    // Must be called before start() to make baked audio available.
+    void setPack(const AssetPack* pack);
+    // Resolve a pack entry name to an index. Game thread only.
+    int sampleIndex(const char* name) const;
+    // Resolve "name_0".."name_(n-1)" and pick one at random. Game thread only.
+    int sampleIndexRandom(const char* baseName, int takes, uint32_t seed) const;
 
-    // --- audio thread ---
+    void post(SoundId id, const vec3& pos, float gain = 1.0f, float pitch = 1.0f);
+    void postUI(SoundId id, float gain = 1.0f, float pitch = 1.0f);
+    void postSample(int sampleIdx, const vec3& pos, float gain = 1.0f, float pitch = 1.0f);
+    // Dialogue: non-positional, and it ducks the ambience bed while it plays.
+    void postVoice(int sampleIdx, float gain = 1.0f);
+    bool voiceBusy() const { return mVoiceBusy.load() > 0.0f; }
+
+    void setListener(const vec3& pos, const vec3& forward);
+    void setBed(int bedSample)       { mBedTarget.store(bedSample); }
+    void setTension(float t)         { mTension.store(clampf(t, 0.0f, 1.0f)); }
+    void setHeartRate(float b)       { mHeartBpm.store(clampf(b, 40.0f, 220.0f)); }
+    void setBreath(float b)          { mBreath.store(clampf(b, 0.0f, 1.0f)); }
+    void setMuffle(float m)          { mMuffle.store(clampf(m, 0.0f, 1.0f)); }
+    void setMasterGain(float g)      { mMaster.store(clampf(g, 0.0f, 1.0f)); }
+    // Indoors the reverb gets shorter and darker; outdoors it opens up.
+    void setIndoor(float indoor)     { mIndoor.store(clampf(indoor, 0.0f, 1.0f)); }
+
     void renderBlock(int16_t* out, int frames);
 
     static const int SAMPLE_RATE = 44100;
+    static const int BLOCK_FRAMES = 512;
 
 private:
+    struct Sample {
+        const int16_t* pcm = nullptr;
+        uint32_t frames = 0;
+        uint32_t rate = 22050;
+        bool stereo = false;
+        char name[PAK_NAME_LEN] = {0};
+    };
+
     struct Voice {
         bool  active = false;
         int   id = 0;
-        float t = 0.0f;          // seconds since trigger
+        int   sample = -1;
+        float t = 0.0f;
         float dur = 0.0f;
         float gain = 1.0f;
         float pitch = 1.0f;
+        double cursor = 0.0;      // fractional read position for sample voices
         vec3  pos;
         bool  positional = true;
-        // per-voice DSP state
+        bool  dialogue = false;
         float ph1 = 0, ph2 = 0, ph3 = 0;
         float lp1 = 0, lp2 = 0, bp1 = 0, bp2 = 0;
         uint32_t rng = 0x2545F491u;
     };
 
-    static const int MAX_VOICES = 28;
-    static const int RING_SIZE = 64;
+    static const int MAX_VOICES = 32;
+    static const int RING_SIZE = 128;
 
     Voice mVoices[MAX_VOICES];
     SoundEvent mRing[RING_SIZE];
     std::atomic<uint32_t> mWrite{0};
     std::atomic<uint32_t> mRead{0};
 
-    std::atomic<float> mLx{0}, mLy{0}, mLz{0}, mFx{0}, mFy{0}, mFz{1};
-    std::atomic<float> mTension{0}, mHeartBpm{62}, mBreath{0}, mMuffle{0}, mMaster{1};
+    std::vector<Sample> mSamples;
+    const AssetPack* mPack = nullptr;
 
-    // ambience / bed state (audio thread only)
+    std::atomic<float> mLx{0}, mLy{0}, mLz{0}, mFx{0}, mFy{0}, mFz{1};
+    std::atomic<float> mTension{0}, mHeartBpm{62}, mBreath{0}, mMuffle{0};
+    std::atomic<float> mMaster{1}, mIndoor{0}, mVoiceBusy{0};
+    std::atomic<int> mBedTarget{-1};
+
+    // bed playback (audio thread)
+    int mBedCur = -1, mBedPrev = -1;
+    double mBedCursor = 0.0, mBedPrevCursor = 0.0;
+    float mBedFade = 1.0f;
+
     float mHeartPhase = 0.0f;
     float mBreathPhase = 0.0f;
     float mDronePh1 = 0, mDronePh2 = 0, mDronePh3 = 0;
@@ -93,9 +143,8 @@ private:
     float mRumbleLp = 0;
     uint32_t mRng = 0x9E3779B9u;
     float mMuffleLpL = 0, mMuffleLpR = 0;
+    float mDuck = 1.0f;
 
-    // Schroeder reverb - four combs into two allpasses. This is what makes the
-    // corridors sound like concrete instead of like a phone speaker.
     static const int NCOMB = 4;
     static const int NAP = 2;
     std::vector<float> mComb[NCOMB];
@@ -111,7 +160,10 @@ private:
     }
     void triggerVoice(const SoundEvent& e);
     float renderVoice(Voice& v, float dt, float& sendOut);
-    float reverb(float in);
+    float renderSampleVoice(Voice& v, float dt, float& sendOut);
+    float reverb(float in, float indoor);
+    void buildSampleTable();
+    void pushEvent(const SoundEvent& e);
 
     void* mEngineObj = nullptr;
     void* mEngineItf = nullptr;
@@ -122,8 +174,6 @@ private:
     bool  mRunning = false;
 
 public:
-    // Double-buffered PCM handed to OpenSL; public so the static C callback can reach it.
-    static const int BLOCK_FRAMES = 512;
     int16_t mBuf[2][BLOCK_FRAMES * 2];
     int mCurBuf = 0;
     void enqueueNext();

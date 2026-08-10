@@ -1,6 +1,6 @@
 #include "gfx.h"
-#include "noise.h"
 #include "font.h"
+#include "matids.h"
 #include <android/log.h>
 #include <cstring>
 #include <cstdlib>
@@ -16,19 +16,29 @@ namespace hm {
 static const char* kSceneVS = R"(#version 300 es
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
-layout(location = 2) in vec2 aUV;
+layout(location = 2) in vec3 aTangent;
+layout(location = 3) in vec2 aUV;
+layout(location = 4) in float aMat;
+layout(location = 5) in float aAO;
 uniform mat4 uMVP;
 uniform mat4 uModel;
 uniform mat4 uLightVP;
 out vec3 vWorld;
 out vec3 vNormal;
+out vec3 vTangent;
 out vec2 vUV;
 out vec4 vLightPos;
+flat out float vMat;
+out float vAO;
 void main() {
     vec4 wp = uModel * vec4(aPos, 1.0);
     vWorld = wp.xyz;
-    vNormal = mat3(uModel) * aNormal;
+    mat3 nm = mat3(uModel);
+    vNormal = nm * aNormal;
+    vTangent = nm * aTangent;
     vUV = aUV;
+    vMat = aMat;
+    vAO = aAO;
     vLightPos = uLightVP * wp;
     gl_Position = uMVP * vec4(aPos, 1.0);
 }
@@ -36,17 +46,20 @@ void main() {
 
 static const char* kSceneFS = R"(#version 300 es
 precision mediump float;
+precision mediump sampler2DArray;
 in vec3 vWorld;
 in vec3 vNormal;
+in vec3 vTangent;
 in vec2 vUV;
 in vec4 vLightPos;
+flat in float vMat;
+in float vAO;
 
-uniform sampler2D uTexA;
-uniform sampler2D uTexB;
+uniform sampler2DArray uAlbedoArray;
+uniform sampler2DArray uNormalArray;
 uniform sampler2D uShadow;
 uniform vec3 uCamPos;
 uniform vec3 uTint;
-uniform float uBlendByNormal;
 uniform float uEmissive;
 uniform vec3 uTorchPos;
 uniform vec3 uTorchDir;
@@ -79,16 +92,31 @@ float shadowFactor(vec3 N, vec3 L) {
 }
 
 void main() {
-    vec3 N = normalize(vNormal);
-    vec3 ca = texture(uTexA, vUV).rgb;
-    vec3 cb = texture(uTexB, vUV).rgb;
-    // Horizontal surfaces get the floor texture, vertical ones the wall
-    // texture. One mesh, two materials, no extra draw calls.
-    float k = uBlendByNormal * smoothstep(0.45, 0.72, abs(N.y));
-    vec3 albedo = mix(ca, cb, k) * uTint;
+    vec3 layerUV = vec3(vUV, vMat);
+    vec4 alb = texture(uAlbedoArray, layerUV);
+    // Cutout materials (chain-link, broken glass) carry opacity in alpha.
+    if (alb.a < 0.35) discard;
 
+    vec4 nr = texture(uNormalArray, layerUV);
+    vec3 nTex = nr.xyz * 2.0 - 1.0;
+    float rough = nr.a;
+
+    vec3 N = normalize(vNormal);
+    vec3 T = normalize(vTangent - N * dot(N, vTangent));
+    vec3 B = cross(N, T);
+    N = normalize(mat3(T, B, N) * nTex);
+
+    vec3 albedo = alb.rgb * uTint;
     vec3 V = normalize(uCamPos - vWorld);
-    vec3 col = uAmbient * albedo;
+
+    // Baked corner occlusion, applied to ambient and indirect only.
+    float ao = clamp(vAO, 0.0, 1.0);
+    vec3 col = uAmbient * albedo * ao;
+
+    // Specular sharpness from the baked roughness: wet asphalt and glazed tile
+    // catch the torch, plaster and cloth do not.
+    float shininess = mix(96.0, 6.0, rough);
+    float specScale = mix(0.55, 0.03, rough);
 
     vec3 Ld = uTorchPos - vWorld;
     float dist = length(Ld);
@@ -97,13 +125,12 @@ void main() {
     float cone = smoothstep(uTorchParams.y, uTorchParams.x, spot);
     float atten = clamp(1.0 - dist / uTorchParams.z, 0.0, 1.0);
     atten *= atten;
-    float ndl = max(dot(N, L), 0.0);
     float lit = cone * atten * uTorchParams.w;
     if (lit > 0.001) {
         float sh = shadowFactor(N, L);
-        col += albedo * uTorchColor * (ndl * lit * sh);
+        col += albedo * uTorchColor * (max(dot(N, L), 0.0) * lit * sh);
         vec3 H = normalize(L + V);
-        col += uTorchColor * pow(max(dot(N, H), 0.0), 28.0) * lit * sh * 0.20;
+        col += uTorchColor * pow(max(dot(N, H), 0.0), shininess) * lit * sh * specScale;
     }
 
     for (int i = 0; i < 8; i++) {
@@ -113,7 +140,10 @@ void main() {
         float a = clamp(1.0 - dd / max(uLightRadius[i], 0.001), 0.0, 1.0);
         a *= a;
         if (a <= 0.001) continue;
-        col += albedo * uLightColor[i] * (max(dot(N, d / max(dd, 0.0001)), 0.0) * a);
+        vec3 Li = d / max(dd, 0.0001);
+        col += albedo * uLightColor[i] * (max(dot(N, Li), 0.0) * a * ao);
+        vec3 H = normalize(Li + V);
+        col += uLightColor[i] * pow(max(dot(N, H), 0.0), shininess) * a * specScale * 0.5;
     }
 
     col += albedo * uEmissive;
@@ -288,13 +318,20 @@ void GpuMesh::upload(const Mesh& m) {
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
     glBufferData(GL_ARRAY_BUFFER, m.verts.size() * sizeof(Vertex), m.verts.data(), GL_STATIC_DRAW);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, m.idx.size() * sizeof(uint16_t), m.idx.data(), GL_STATIC_DRAW);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, m.idx.size() * sizeof(uint32_t), m.idx.data(), GL_STATIC_DRAW);
+    const GLsizei stride = sizeof(Vertex);
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
     glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(3 * sizeof(float)));
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3 * sizeof(float)));
     glEnableVertexAttribArray(2);
-    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(6 * sizeof(float)));
+    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, stride, (void*)(6 * sizeof(float)));
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, stride, (void*)(9 * sizeof(float)));
+    glEnableVertexAttribArray(4);
+    glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, stride, (void*)(11 * sizeof(float)));
+    glEnableVertexAttribArray(5);
+    glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, stride, (void*)(12 * sizeof(float)));
     glBindVertexArray(0);
     count = (GLsizei)m.idx.size();
 }
@@ -307,102 +344,62 @@ void GpuMesh::destroy() {
     count = 0;
 }
 
-// ------------------------------------------------------------ texture baking
+// ---------------------------------------------------- material array upload
 
-static const int TEXSZ = 256;
-
-static void writePixel(std::vector<uint8_t>& d, int x, int y, float r, float g, float b) {
-    int i = (y * TEXSZ + x) * 4;
-    d[i + 0] = (uint8_t)(clampf(r, 0.0f, 1.0f) * 255.0f);
-    d[i + 1] = (uint8_t)(clampf(g, 0.0f, 1.0f) * 255.0f);
-    d[i + 2] = (uint8_t)(clampf(b, 0.0f, 1.0f) * 255.0f);
-    d[i + 3] = 255;
-}
-
-static GLuint makeTexture(const std::vector<uint8_t>& data) {
-    GLuint t = 0;
-    glGenTextures(1, &t);
-    glBindTexture(GL_TEXTURE_2D, t);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, TEXSZ, TEXSZ, 0, GL_RGBA, GL_UNSIGNED_BYTE, data.data());
-    glGenerateMipmap(GL_TEXTURE_2D);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    return t;
-}
-
-void Renderer::buildTextures() {
-    std::vector<uint8_t> d(TEXSZ * TEXSZ * 4);
-    const float inv = 8.0f / TEXSZ;   // 8 noise cells across the tile
-
-    // --- concrete wall: cast marks, pitting, damp streaks running down ---
-    for (int y = 0; y < TEXSZ; y++) {
-        for (int x = 0; x < TEXSZ; x++) {
-            float fx = x * inv, fy = y * inv;
-            float base = 0.34f + fbm(fx, fy, 4, 8) * 0.30f;
-            float pits = worley(fx * 2.0f, fy * 2.0f, 16);
-            base -= smoothstepf(0.35f, 0.0f, pits) * 0.22f;
-            // Vertical damp streaks: sampled with a squashed y so they smear down.
-            float streak = fbm(fx * 3.0f, fy * 0.35f, 3, 24);
-            base -= smoothstepf(0.55f, 0.85f, streak) * 0.20f;
-            float grain = (hash2(x * 7, y * 13) - 0.5f) * 0.045f;
-            base += grain;
-            writePixel(d, x, y, base * 1.00f, base * 0.985f, base * 0.94f);
-        }
+// Uploads every baked material into two texture arrays: albedo+opacity, and
+// tangent-space normal with roughness in alpha. One array means one bind and
+// one draw call for the entire city.
+bool Renderer::buildMaterialArrays(const AssetPack* pack) {
+    if (!pack || !pack->valid()) {
+        GERR("no asset pack: materials unavailable");
+        return false;
     }
-    mTex[TEX_WALL] = makeTexture(d);
 
-    // --- floor: darker, tiled, with grime pooling in the joints ---
-    for (int y = 0; y < TEXSZ; y++) {
-        for (int x = 0; x < TEXSZ; x++) {
-            float fx = x * inv, fy = y * inv;
-            float base = 0.20f + fbm(fx * 1.4f, fy * 1.4f, 4, 12) * 0.22f;
-            // Tile grid every 64px, with joints darkened.
-            float gx = std::fabs(std::fmod((float)x, 64.0f) - 32.0f) / 32.0f;
-            float gy = std::fabs(std::fmod((float)y, 64.0f) - 32.0f) / 32.0f;
-            float joint = std::max(smoothstepf(0.90f, 1.0f, gx), smoothstepf(0.90f, 1.0f, gy));
-            base -= joint * 0.13f;
-            float grime = fbm(fx * 0.8f, fy * 0.8f, 3, 8);
-            base *= 0.75f + grime * 0.5f;
-            base += (hash2(x * 3, y * 5) - 0.5f) * 0.035f;
-            writePixel(d, x, y, base * 0.98f, base * 0.97f, base * 0.92f);
-        }
+    // Determine dimensions from the first albedo entry.
+    int size = 0;
+    for (int i = 0; i < MAT_COUNT; i++) {
+        char name[64];
+        std::snprintf(name, sizeof(name), "%s_a", kMatNames[i]);
+        const PakEntry* e = pack->find(name);
+        if (e) { size = (int)e->w; break; }
     }
-    mTex[TEX_FLOOR] = makeTexture(d);
+    if (size <= 0) { GERR("pack has no material textures"); return false; }
+    mMaterialLayers = MAT_COUNT;
 
-    // --- metal: brushed, with rust blooming out of the low spots ---
-    for (int y = 0; y < TEXSZ; y++) {
-        for (int x = 0; x < TEXSZ; x++) {
-            float fx = x * inv, fy = y * inv;
-            float brushed = 0.36f + fbm(fx * 6.0f, fy * 0.25f, 3, 32) * 0.26f;
-            float rustMask = fbm(fx * 1.2f, fy * 1.2f, 4, 10);
-            float rust = smoothstepf(0.52f, 0.78f, rustMask);
-            float r = lerpf(brushed, 0.34f, rust);
-            float g = lerpf(brushed * 1.01f, 0.17f, rust);
-            float b = lerpf(brushed * 1.06f, 0.09f, rust);
-            float grain = (hash2(x * 11, y * 3) - 0.5f) * 0.05f;
-            writePixel(d, x, y, r + grain, g + grain, b + grain);
+    auto makeArray = [&](GLuint& tex, const char* suffix) {
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, tex);
+        glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGBA8, size, size, MAT_COUNT);
+        int uploaded = 0;
+        for (int i = 0; i < MAT_COUNT; i++) {
+            char name[64];
+            std::snprintf(name, sizeof(name), "%s%s", kMatNames[i], suffix);
+            const PakEntry* e = pack->find(name);
+            if (!e || (int)e->w != size || (int)e->h != size) {
+                GERR("material '%s' missing or wrong size", name);
+                continue;
+            }
+            glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, i, size, size, 1,
+                            GL_RGBA, GL_UNSIGNED_BYTE, pack->dataOf(*e));
+            uploaded++;
         }
-    }
-    mTex[TEX_METAL] = makeTexture(d);
+        // Mipmaps are generated on device rather than shipped: it costs a
+        // moment at load and saves a third of the download.
+        glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        return uploaded;
+    };
 
-    // --- flesh: cellular, veined, drained of colour ---
-    for (int y = 0; y < TEXSZ; y++) {
-        for (int x = 0; x < TEXSZ; x++) {
-            float fx = x * inv, fy = y * inv;
-            float cells = worley(fx * 3.0f, fy * 3.0f, 24);
-            float skin = 0.42f + smoothstepf(0.0f, 0.5f, cells) * 0.22f;
-            // Veins: thin dark filaments where fbm crosses a narrow band.
-            float vn = fbm(fx * 2.2f, fy * 2.2f, 4, 16);
-            float vein = 1.0f - smoothstepf(0.0f, 0.055f, std::fabs(vn - 0.47f));
-            skin -= vein * 0.24f;
-            float mottle = fbm(fx * 5.0f, fy * 5.0f, 3, 40);
-            skin *= 0.86f + mottle * 0.28f;
-            writePixel(d, x, y, skin * 0.86f, skin * 0.80f, skin * 0.78f);
-        }
-    }
-    mTex[TEX_FLESH] = makeTexture(d);
+    // The array is immutable storage, so it must be recreated, not reused.
+    if (mAlbedoArray) glDeleteTextures(1, &mAlbedoArray);
+    if (mNormalArray) glDeleteTextures(1, &mNormalArray);
+    int a = makeArray(mAlbedoArray, "_a");
+    int n = makeArray(mNormalArray, "_n");
+    GLOG("materials: %d albedo + %d normal layers at %dx%d", a, n, size, size);
+    return a > 0;
 }
 
 // The atlas is 16x5 cells of 8x8. Glyphs occupy cells 0..63; cell 79 is a
@@ -452,7 +449,7 @@ void Renderer::buildFont() {
 void Renderer::forgetGlState() {
     mSceneFbo = mSceneColor = mSceneDepth = 0;
     mShadowFbo = mShadowTex = 0;
-    for (int i = 0; i < TEX_COUNT; i++) mTex[i] = 0;
+    mAlbedoArray = mNormalArray = 0;
     mFontTex = 0;
     mUiVao = mUiVbo = mEmptyVao = 0;
     mSceneProg = mDepthProg = mPostProg = mUiProg = 0;
@@ -461,7 +458,7 @@ void Renderer::forgetGlState() {
     mUiVerts = nullptr;
 }
 
-bool Renderer::init() {
+bool Renderer::init(const AssetPack* pack) {
     forgetGlState();
     mSceneProg = link(kSceneVS, kSceneFS);
     mDepthProg = link(kDepthVS, kDepthFS);
@@ -477,10 +474,9 @@ bool Renderer::init() {
     uLightVP = glGetUniformLocation(mSceneProg, "uLightVP");
     uCamPos = glGetUniformLocation(mSceneProg, "uCamPos");
     uTint = glGetUniformLocation(mSceneProg, "uTint");
-    uTexA = glGetUniformLocation(mSceneProg, "uTexA");
-    uTexB = glGetUniformLocation(mSceneProg, "uTexB");
+    uAlbedoArr = glGetUniformLocation(mSceneProg, "uAlbedoArray");
+    uNormalArr = glGetUniformLocation(mSceneProg, "uNormalArray");
     uShadow = glGetUniformLocation(mSceneProg, "uShadow");
-    uBlendN = glGetUniformLocation(mSceneProg, "uBlendByNormal");
     uEmissive = glGetUniformLocation(mSceneProg, "uEmissive");
     uTorchPos = glGetUniformLocation(mSceneProg, "uTorchPos");
     uTorchDir = glGetUniformLocation(mSceneProg, "uTorchDir");
@@ -506,7 +502,7 @@ bool Renderer::init() {
     uScreen = glGetUniformLocation(mUiProg, "uScreen");
     uUiTex = glGetUniformLocation(mUiProg, "uUiTex");
 
-    buildTextures();
+    buildMaterialArrays(pack);
     buildFont();
 
     glGenVertexArrays(1, &mEmptyVao);
@@ -603,7 +599,8 @@ void Renderer::shutdown() {
     destroyTargets();
     if (mShadowFbo) glDeleteFramebuffers(1, &mShadowFbo);
     if (mShadowTex) glDeleteTextures(1, &mShadowTex);
-    for (int i = 0; i < TEX_COUNT; i++) if (mTex[i]) glDeleteTextures(1, &mTex[i]);
+    if (mAlbedoArray) glDeleteTextures(1, &mAlbedoArray);
+    if (mNormalArray) glDeleteTextures(1, &mNormalArray);
     if (mFontTex) glDeleteTextures(1, &mFontTex);
     if (mUiVbo) glDeleteBuffers(1, &mUiVbo);
     if (mUiVao) glDeleteVertexArrays(1, &mUiVao);
@@ -646,7 +643,7 @@ void Renderer::drawShadow(const GpuMesh& m, const mat4& model) {
     mat4 mvp = mLightVP * model;
     glUniformMatrix4fv(dMVP, 1, GL_FALSE, mvp.m);
     glBindVertexArray(m.vao);
-    glDrawElements(GL_TRIANGLES, m.count, GL_UNSIGNED_SHORT, nullptr);
+    glDrawElements(GL_TRIANGLES, m.count, GL_UNSIGNED_INT, nullptr);
 }
 
 void Renderer::endShadowPass() {
@@ -692,28 +689,64 @@ void Renderer::beginScene(const SceneParams& sp) {
         glUniform1fv(uLightRadArr, n, lr);
     }
 
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, mAlbedoArray);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, mNormalArray);
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D, mShadowTex);
+    glUniform1i(uAlbedoArr, 0);
+    glUniform1i(uNormalArr, 1);
     glUniform1i(uShadow, 2);
-    glUniform1i(uTexA, 0);
-    glUniform1i(uTexB, 1);
+
+    extractFrustum(mViewProj);
+    mDrawCalls = 0;
+    mTris = 0;
 }
 
-void Renderer::draw(const GpuMesh& m, const mat4& model, const vec3& tint,
-                    int texA, int texB, float blendByNormal, float emissive) {
+// Gribb-Hartmann plane extraction straight from the view-projection matrix.
+void Renderer::extractFrustum(const mat4& m) {
+    const float* v = m.m;
+    auto setPlane = [&](int i, float a, float b, float c, float d) {
+        float len = std::sqrt(a * a + b * b + c * c);
+        if (len < 1e-8f) len = 1.0f;
+        mFrustum[i][0] = a / len;
+        mFrustum[i][1] = b / len;
+        mFrustum[i][2] = c / len;
+        mFrustum[i][3] = d / len;
+    };
+    setPlane(0, v[3] + v[0], v[7] + v[4], v[11] + v[8],  v[15] + v[12]);   // left
+    setPlane(1, v[3] - v[0], v[7] - v[4], v[11] - v[8],  v[15] - v[12]);   // right
+    setPlane(2, v[3] + v[1], v[7] + v[5], v[11] + v[9],  v[15] + v[13]);   // bottom
+    setPlane(3, v[3] - v[1], v[7] - v[5], v[11] - v[9],  v[15] - v[13]);   // top
+    setPlane(4, v[3] + v[2], v[7] + v[6], v[11] + v[10], v[15] + v[14]);   // near
+    setPlane(5, v[3] - v[2], v[7] - v[6], v[11] - v[10], v[15] - v[14]);   // far
+}
+
+bool Renderer::visible(const vec3& mn, const vec3& mx) const {
+    for (int i = 0; i < 6; i++) {
+        // Test the box corner furthest along the plane normal: if even that is
+        // behind the plane the whole box is outside.
+        float x = mFrustum[i][0] >= 0.0f ? mx.x : mn.x;
+        float y = mFrustum[i][1] >= 0.0f ? mx.y : mn.y;
+        float z = mFrustum[i][2] >= 0.0f ? mx.z : mn.z;
+        if (mFrustum[i][0] * x + mFrustum[i][1] * y + mFrustum[i][2] * z + mFrustum[i][3] < 0.0f)
+            return false;
+    }
+    return true;
+}
+
+void Renderer::draw(const GpuMesh& m, const mat4& model, const vec3& tint, float emissive) {
     if (!m.valid()) return;
     mat4 mvp = mViewProj * model;
     glUniformMatrix4fv(uMVP, 1, GL_FALSE, mvp.m);
     glUniformMatrix4fv(uModel, 1, GL_FALSE, model.m);
     glUniform3f(uTint, tint.x, tint.y, tint.z);
-    glUniform1f(uBlendN, blendByNormal);
     glUniform1f(uEmissive, emissive);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, mTex[texA]);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, mTex[texB]);
     glBindVertexArray(m.vao);
-    glDrawElements(GL_TRIANGLES, m.count, GL_UNSIGNED_SHORT, nullptr);
+    glDrawElements(GL_TRIANGLES, m.count, GL_UNSIGNED_INT, nullptr);
+    mDrawCalls++;
+    mTris += m.count / 3;
 }
 
 void Renderer::endScene() {

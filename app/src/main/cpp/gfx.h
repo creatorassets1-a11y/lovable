@@ -7,6 +7,7 @@
 #pragma once
 #include "hmath.h"
 #include "mesh.h"
+#include "assets.h"
 #include <GLES3/gl3.h>
 
 namespace hm {
@@ -46,11 +47,14 @@ struct SceneParams {
     float time = 0.0f;
 };
 
-enum TexId { TEX_WALL = 0, TEX_FLOOR, TEX_METAL, TEX_FLESH, TEX_COUNT };
+// Every material lives as a layer of one texture array, so a whole chunk of
+// city - road, kerb, brick, glass, steel - is a single draw call.
 
 class Renderer {
 public:
-    bool init();
+    // The pack supplies the material array; without it the renderer falls back
+    // to flat untextured surfaces rather than failing to start.
+    bool init(const AssetPack* pack);
     void shutdown();
     void resize(int w, int h);
     int width() const { return mW; }
@@ -65,9 +69,12 @@ public:
     void endShadowPass();
 
     void beginScene(const SceneParams& sp);
-    void draw(const GpuMesh& m, const mat4& model, const vec3& tint,
-              int texA, int texB, float blendByNormal, float emissive);
+    void draw(const GpuMesh& m, const mat4& model, const vec3& tint, float emissive);
     void endScene();
+    // Frustum test in world space, used to cull city chunks.
+    bool visible(const vec3& mn, const vec3& mx) const;
+    int drawCalls() const { return mDrawCalls; }
+    int trisDrawn() const { return mTris; }
 
     // fear drives grain/aberration, fade is the black curtain, damage is the
     // red pulse when the creature reaches you.
@@ -91,17 +98,20 @@ private:
     GLuint mSceneProg = 0, mDepthProg = 0, mPostProg = 0, mUiProg = 0;
     GLuint mSceneFbo = 0, mSceneColor = 0, mSceneDepth = 0;
     GLuint mShadowFbo = 0, mShadowTex = 0;
-    GLuint mTex[TEX_COUNT] = {0, 0, 0, 0};
+    GLuint mAlbedoArray = 0, mNormalArray = 0;
+    int mMaterialLayers = 0;
     GLuint mFontTex = 0;
     GLuint mUiVao = 0, mUiVbo = 0;
     GLuint mEmptyVao = 0;
 
     mat4 mLightVP;
     mat4 mViewProj;
+    float mFrustum[6][4];      // world-space planes for chunk culling
+    int mDrawCalls = 0, mTris = 0;
 
     // scene uniform locations
     GLint uMVP = -1, uModel = -1, uLightVP = -1, uCamPos = -1, uTint = -1;
-    GLint uTexA = -1, uTexB = -1, uShadow = -1, uBlendN = -1, uEmissive = -1;
+    GLint uAlbedoArr = -1, uNormalArr = -1, uShadow = -1, uEmissive = -1;
     GLint uTorchPos = -1, uTorchDir = -1, uTorchColor = -1, uTorchParams = -1;
     GLint uNumLights = -1, uLightPosArr = -1, uLightColArr = -1, uLightRadArr = -1;
     GLint uAmbient = -1, uFogColor = -1, uFogDensity = -1;
@@ -118,8 +128,9 @@ private:
     void createTargets();
     void destroyTargets();
     void forgetGlState();
-    void buildTextures();
+    bool buildMaterialArrays(const AssetPack* pack);
     void buildFont();
+    void extractFrustum(const mat4& viewProj);
     void uiPushQuad(float x0, float y0, float x1, float y1,
                     float u0, float v0, float u1, float v1,
                     float r, float g, float b, float a);

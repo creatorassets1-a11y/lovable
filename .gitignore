@@ -14,3 +14,7 @@ local.properties
 .idea/
 *.iml
 .DS_Store
+
+# Baked assets: 61MB of generated output, reproducible with tools/bake.sh.
+# The shipped APK in dist/ already contains them.
+app/src/main/assets/*.pak

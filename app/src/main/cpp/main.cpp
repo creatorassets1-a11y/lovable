@@ -1,6 +1,8 @@
 // main.cpp - NativeActivity entry point: EGL, lifecycle, input pump.
 #include "game.h"
+#include "platform.h"
 #include <android_native_app_glue.h>
+#include <android/asset_manager.h>
 #include <android/log.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -203,7 +205,8 @@ void handleCmd(android_app* app, int32_t cmd) {
     case APP_CMD_INIT_WINDOW:
         if (app->window) {
             if (!e->inited) {
-                e->game.init(app->activity->internalDataPath);
+                e->game.init(app->activity->internalDataPath, app->activity->assetManager);
+                hm::platformSetGame(&e->game);
                 e->inited = true;
             }
             initDisplay(e);

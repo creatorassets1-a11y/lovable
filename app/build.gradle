@@ -1,5 +1,6 @@
 plugins {
     id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
 }
 
 android {
@@ -10,11 +11,11 @@ android {
     defaultConfig {
         applicationId "com.hollowsignal.game"
         // API 21 covers effectively every Android device still in use, and is
-        // the floor for the GLES 3.0 + OpenSL ES feature set the game needs.
+        // the floor for the GLES 3.0 + OpenSL ES feature set the engine needs.
         minSdk 21
         targetSdk 34
-        versionCode 1
-        versionName "1.0"
+        versionCode 2
+        versionName "2.0"
 
         ndk {
             abiFilters 'arm64-v8a', 'armeabi-v7a'
@@ -28,6 +29,12 @@ android {
         }
     }
 
+    sourceSets {
+        main {
+            java.srcDirs += ['src/main/kotlin']
+        }
+    }
+
     externalNativeBuild {
         cmake {
             path 'src/main/cpp/CMakeLists.txt'
@@ -35,11 +42,17 @@ android {
         }
     }
 
+    androidResources {
+        // The asset pack is stored uncompressed so the runtime can map it and
+        // hand pixel data straight to the driver with no inflate step and no
+        // second copy. It costs download size and buys load time.
+        noCompress += ['pak']
+    }
+
     buildTypes {
         release {
             minifyEnabled false
             debuggable false
-            // Native code is already optimised by CMake; there is no Java to shrink.
         }
         debug {
             debuggable true
@@ -52,13 +65,15 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
 
-    packagingOptions {
-        jniLibs {
-            useLegacyPackaging false
-        }
+    kotlinOptions {
+        jvmTarget = '17'
     }
 
     lint {
         abortOnError false
     }
+}
+
+dependencies {
+    implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.9.24'
 }

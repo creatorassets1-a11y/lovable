@@ -25,6 +25,8 @@ static const float kDur[SND_COUNT] = {
     2.00f,  // STINGER
     1.70f,  // SCREECH
     1.50f,  // GROWL
+    0.90f,  // CHITTER
+    2.40f,  // WATCHER_CALL
     0.80f,  // PICKUP
     1.40f,  // DOOR
     0.10f,  // FLASHLIGHT
@@ -36,30 +38,122 @@ static const float kDur[SND_COUNT] = {
     3.00f,  // DEATH
     0.36f,  // HEARTBEAT_THUMP
     1.00f,  // BREATH
+    1.20f,  // FLARE_FIRE
+    0.35f,  // RADIO_BEEP
+    1.00f, 1.00f, 1.00f, 1.00f,   // NPC_*: always resolved to baked samples
 };
 
 // How much of each sound feeds the reverb. Dry impacts stay close; screams and
-// metal ring down the whole corridor.
+// metal ring down the whole street.
 static const float kSend[SND_COUNT] = {
-    0.18f, 0.24f, 0.30f, 0.75f, 0.70f, 0.40f, 0.45f, 0.35f,
-    0.05f, 0.65f, 0.72f, 0.55f, 0.40f, 0.60f, 0.65f, 0.05f, 0.15f
+    0.18f, 0.24f, 0.30f, 0.75f, 0.70f, 0.40f, 0.45f, 0.80f,
+    0.45f, 0.35f, 0.05f, 0.65f, 0.72f, 0.55f, 0.40f, 0.60f,
+    0.65f, 0.05f, 0.15f, 0.50f, 0.10f,
+    0.40f, 0.40f, 0.40f, 0.40f,
+};
+
+// Ids that are played from baked audio rather than synthesised. Resolved once
+// at start-up; post() picks a take so a line never repeats back to back.
+struct IdSampleSet { const char* base; int takes; };
+static const IdSampleSet kIdSamples[SND_COUNT] = {
+    {nullptr,0},{nullptr,0},{nullptr,0},{nullptr,0},{nullptr,0},{nullptr,0},
+    {"vx_chitter",3},          // CHITTER
+    {"vx_wail",3},             // WATCHER_CALL
+    {nullptr,0},{nullptr,0},{nullptr,0},{nullptr,0},{nullptr,0},{nullptr,0},
+    {nullptr,0},{nullptr,0},{nullptr,0},{nullptr,0},{nullptr,0},{nullptr,0},
+    {nullptr,0},
+    {"vo_sv_help",1},          // NPC_HELP
+    {"vx_sob",3},              // NPC_SOB
+    {"vo_sv_run",1},           // NPC_RUN
+    {"vo_sv_follow",1},        // NPC_FOLLOW
 };
 
 // ------------------------------------------------------------- event plumbing
 
-void AudioEngine::post(SoundId id, const vec3& pos, float gain, float pitch) {
+void AudioEngine::setPack(const AssetPack* pack) { mPack = pack; }
+
+void AudioEngine::buildSampleTable() {
+    mSamples.clear();
+    if (!mPack || !mPack->valid()) return;
+    for (int i = 0; i < mPack->count(); i++) {
+        const PakEntry* e = mPack->entryAt(i);
+        if (!e) continue;
+        if (e->type != PAK_AUDIO_MONO && e->type != PAK_AUDIO_STEREO) continue;
+        Sample s;
+        s.pcm = reinterpret_cast<const int16_t*>(mPack->dataOf(*e));
+        s.rate = e->w;
+        s.frames = e->h;
+        s.stereo = (e->type == PAK_AUDIO_STEREO);
+        std::memcpy(s.name, e->name, PAK_NAME_LEN);
+        mSamples.push_back(s);
+    }
+    ALOG("audio: %d baked samples", (int)mSamples.size());
+}
+
+int AudioEngine::sampleIndex(const char* name) const {
+    for (size_t i = 0; i < mSamples.size(); i++)
+        if (std::strncmp(mSamples[i].name, name, PAK_NAME_LEN) == 0) return (int)i;
+    return -1;
+}
+
+int AudioEngine::sampleIndexRandom(const char* base, int takes, uint32_t seed) const {
+    if (takes <= 1) return sampleIndex(base);
+    char buf[PAK_NAME_LEN];
+    std::snprintf(buf, sizeof(buf), "%s_%d", base, (int)(seed % (uint32_t)takes));
+    int idx = sampleIndex(buf);
+    if (idx >= 0) return idx;
+    return sampleIndex(base);
+}
+
+void AudioEngine::pushEvent(const SoundEvent& e) {
     uint32_t w = mWrite.load(std::memory_order_relaxed);
     uint32_t r = mRead.load(std::memory_order_acquire);
     if (w - r >= RING_SIZE) return;   // ring full: drop, never block the game
-    SoundEvent& e = mRing[w % RING_SIZE];
-    e.id = id; e.x = pos.x; e.y = pos.y; e.z = pos.z;
-    e.gain = gain; e.pitch = pitch;
+    mRing[w % RING_SIZE] = e;
     mWrite.store(w + 1, std::memory_order_release);
 }
 
+void AudioEngine::post(SoundId id, const vec3& pos, float gain, float pitch) {
+    SoundEvent e{};
+    e.id = id;
+    e.sample = -1;
+    // Some ids are baked rather than synthesised. Resolving here keeps the
+    // string lookup on the game thread, where it is allowed to be slow.
+    if (id >= 0 && id < SND_COUNT && kIdSamples[id].base) {
+        static uint32_t rot = 0;
+        e.sample = sampleIndexRandom(kIdSamples[id].base, kIdSamples[id].takes, rot++);
+    }
+    e.x = pos.x; e.y = pos.y; e.z = pos.z;
+    e.gain = gain; e.pitch = pitch;
+    e.flags = (pos.x > 1e8f) ? 1 : 0;
+    pushEvent(e);
+}
+
 void AudioEngine::postUI(SoundId id, float gain, float pitch) {
-    // A far-off sentinel position is the flag for "not positional".
     post(id, vec3(1e9f, 1e9f, 1e9f), gain, pitch);
+}
+
+void AudioEngine::postSample(int sampleIdx, const vec3& pos, float gain, float pitch) {
+    if (sampleIdx < 0 || sampleIdx >= (int)mSamples.size()) return;
+    SoundEvent e{};
+    e.id = -1;
+    e.sample = sampleIdx;
+    e.x = pos.x; e.y = pos.y; e.z = pos.z;
+    e.gain = gain; e.pitch = pitch;
+    e.flags = 0;
+    pushEvent(e);
+}
+
+void AudioEngine::postVoice(int sampleIdx, float gain) {
+    if (sampleIdx < 0 || sampleIdx >= (int)mSamples.size()) return;
+    SoundEvent e{};
+    e.id = -1;
+    e.sample = sampleIdx;
+    e.x = e.y = e.z = 0.0f;
+    e.gain = gain;
+    e.pitch = 1.0f;
+    e.flags = 1 | 2;    // non-positional dialogue
+    pushEvent(e);
 }
 
 void AudioEngine::setListener(const vec3& pos, const vec3& forward) {
@@ -81,12 +175,20 @@ void AudioEngine::triggerVoice(const SoundEvent& e) {
     Voice& v = mVoices[slot];
     v.active = true;
     v.id = e.id;
+    v.sample = e.sample;
     v.t = 0.0f;
-    v.dur = kDur[e.id] / std::max(0.25f, e.pitch);
+    v.cursor = 0.0;
+    if (e.sample >= 0 && e.sample < (int)mSamples.size()) {
+        const Sample& sm = mSamples[e.sample];
+        v.dur = sm.frames / (float)sm.rate / std::max(0.25f, e.pitch) + 0.02f;
+    } else {
+        v.dur = kDur[e.id >= 0 ? e.id : 0] / std::max(0.25f, e.pitch);
+    }
     v.gain = e.gain;
     v.pitch = e.pitch;
     v.pos = vec3(e.x, e.y, e.z);
-    v.positional = e.x < 1e8f;
+    v.dialogue = (e.flags & 2) != 0;
+    v.positional = (e.flags & 1) == 0;
     v.ph1 = v.ph2 = v.ph3 = 0.0f;
     v.lp1 = v.lp2 = v.bp1 = v.bp2 = 0.0f;
     v.rng = (uint32_t)(0x9E3779B9u + slot * 2654435761u + (uint32_t)(e.gain * 100003.0f));
@@ -171,6 +273,25 @@ float AudioEngine::renderVoice(Voice& v, float dt, float& sendOut) {
         v.lp2 += (v.lp1 - v.lp2) * 0.09f;
         v.lp1 += (n * 0.25f - v.lp1) * 0.02f;
         s = v.lp2 * env * 1.6f;
+        break;
+    }
+    case SND_FLARE_FIRE: {
+        // Sharp crack, then the hiss of the flare burning.
+        float crack = n * std::exp(-t * 40.0f) * 1.4f;
+        v.lp1 += (n - v.lp1) * 0.30f;
+        v.lp2 += (v.lp1 - v.lp2) * 0.30f;
+        float hiss = (v.lp1 - v.lp2) * 3.0f * std::exp(-t * 1.6f);
+        v.ph1 += 140.0f * dt;
+        float whoosh = std::sin(v.ph1 * TAU) * std::exp(-t * 6.0f) * 0.4f;
+        s = std::tanh(crack + whoosh) * 0.7f + hiss * 0.5f;
+        break;
+    }
+    case SND_RADIO_BEEP: {
+        // Two-tone squelch, the sound of a channel opening.
+        float env = (p < 0.5f) ? 1.0f : 0.0f;
+        v.ph1 += (p < 0.25f ? 880.0f : 1180.0f) * dt;
+        s = std::sin(v.ph1 * TAU) * env * 0.28f * std::exp(-t * 2.0f);
+        s += n * 0.05f * env;
         break;
     }
     case SND_PICKUP: {
@@ -288,9 +409,37 @@ float AudioEngine::renderVoice(Voice& v, float dt, float& sendOut) {
     return s;
 }
 
+// Baked-sample playback with linear interpolation. Sample rates differ from
+// the mixer rate, so the read cursor advances fractionally.
+float AudioEngine::renderSampleVoice(Voice& v, float dt, float& sendOut) {
+    if (v.sample < 0 || v.sample >= (int)mSamples.size()) { v.active = false; return 0.0f; }
+    const Sample& sm = mSamples[v.sample];
+    double step = (double)sm.rate / SAMPLE_RATE * v.pitch;
+    double c = v.cursor;
+    v.cursor += step;
+    if (c >= sm.frames - 1) { v.active = false; return 0.0f; }
+
+    uint32_t i0 = (uint32_t)c;
+    uint32_t i1 = i0 + 1;
+    float frac = (float)(c - i0);
+    float s;
+    if (sm.stereo) {
+        float a = sm.pcm[i0 * 2] * (1.0f / 32768.0f);
+        float b = sm.pcm[i1 * 2] * (1.0f / 32768.0f);
+        s = lerpf(a, b, frac);
+    } else {
+        float a = sm.pcm[i0] * (1.0f / 32768.0f);
+        float b = sm.pcm[i1] * (1.0f / 32768.0f);
+        s = lerpf(a, b, frac);
+    }
+    (void)dt;
+    sendOut = v.dialogue ? 0.05f : 0.45f;
+    return s * v.gain;
+}
+
 // --------------------------------------------------------------------- reverb
 
-float AudioEngine::reverb(float in) {
+float AudioEngine::reverb(float in, float indoor) {
     float acc = 0.0f;
     for (int i = 0; i < NCOMB; i++) {
         std::vector<float>& buf = mComb[i];
@@ -298,8 +447,12 @@ float AudioEngine::reverb(float in) {
         float out = buf[idx];
         // One-pole damping in the feedback path: high frequencies die first,
         // exactly like they do in a concrete corridor.
-        mCombLp[i] += (out - mCombLp[i]) * 0.38f;
-        buf[idx] = in + mCombLp[i] * mCombFb[i];
+        // Indoors the tail is shorter and darker; outdoors a street opens up
+        // into a longer, brighter reflection.
+        float damp = lerpf(0.30f, 0.52f, indoor);
+        float fb = mCombFb[i] * lerpf(1.0f, 0.86f, indoor);
+        mCombLp[i] += (out - mCombLp[i]) * damp;
+        buf[idx] = in + mCombLp[i] * fb;
         idx = (idx + 1) % (int)buf.size();
         acc += out;
     }
@@ -337,6 +490,19 @@ void AudioEngine::renderBlock(int16_t* out, int frames) {
     float breath = mBreath.load();
     float muffle = mMuffle.load();
     float master = mMaster.load();
+    float indoor = mIndoor.load();
+
+    // Crossfade to a new ambience bed when the game asks for one.
+    int wantBed = mBedTarget.load();
+    if (wantBed != mBedCur) {
+        mBedPrev = mBedCur;
+        mBedPrevCursor = mBedCursor;
+        mBedCur = wantBed;
+        mBedCursor = 0.0;
+        mBedFade = 0.0f;
+    }
+
+    bool anyDialogue = false;
 
     for (int i = 0; i < frames; i++) {
         float dryL = 0.0f, dryR = 0.0f, send = 0.0f;
@@ -345,7 +511,9 @@ void AudioEngine::renderBlock(int16_t* out, int frames) {
             Voice& v = mVoices[vi];
             if (!v.active) continue;
             float sd = 0.0f;
-            float s = renderVoice(v, dt, sd);
+            float s = (v.sample >= 0) ? renderSampleVoice(v, dt, sd)
+                                      : renderVoice(v, dt, sd);
+            if (v.dialogue && v.active) anyDialogue = true;
             v.t += dt;
             if (v.t > v.dur) v.active = false;
 
@@ -369,7 +537,39 @@ void AudioEngine::renderBlock(int16_t* out, int frames) {
             send += sv * sd;
         }
 
-        // --- ambient bed ---
+        // --- baked ambience bed ---
+        float bedL = 0.0f, bedR = 0.0f;
+        auto readBed = [&](int idx, double& cursor, float& l, float& r) {
+            if (idx < 0 || idx >= (int)mSamples.size()) return;
+            const Sample& sm = mSamples[idx];
+            if (sm.frames < 2) return;
+            double step = (double)sm.rate / SAMPLE_RATE;
+            if (cursor >= sm.frames - 1) cursor = 0.0;   // beds loop
+            uint32_t i0 = (uint32_t)cursor;
+            uint32_t i1 = i0 + 1;
+            float f = (float)(cursor - i0);
+            if (sm.stereo) {
+                l = lerpf(sm.pcm[i0 * 2] * (1.0f / 32768.0f), sm.pcm[i1 * 2] * (1.0f / 32768.0f), f);
+                r = lerpf(sm.pcm[i0 * 2 + 1] * (1.0f / 32768.0f), sm.pcm[i1 * 2 + 1] * (1.0f / 32768.0f), f);
+            } else {
+                l = r = lerpf(sm.pcm[i0] * (1.0f / 32768.0f), sm.pcm[i1] * (1.0f / 32768.0f), f);
+            }
+            cursor += step;
+        };
+        {
+            float cl = 0, cr = 0, pl = 0, pr = 0;
+            readBed(mBedCur, mBedCursor, cl, cr);
+            if (mBedFade < 1.0f) readBed(mBedPrev, mBedPrevCursor, pl, pr);
+            bedL = lerpf(pl, cl, mBedFade);
+            bedR = lerpf(pr, cr, mBedFade);
+            mBedFade = std::min(1.0f, mBedFade + dt * 0.5f);
+        }
+        // Dialogue ducks the bed so a radio call is never fighting the wind.
+        mDuck = lerpf(mDuck, anyDialogue ? 0.34f : 1.0f, clampf(dt * 3.5f, 0.0f, 1.0f));
+        bedL *= mDuck;
+        bedR *= mDuck;
+
+        // --- synthesised ambient layer ---
         // Heartbeat: a lub-dub pair whose rate and depth follow tension.
         mHeartPhase += (heartBpm / 60.0f) * dt;
         if (mHeartPhase >= 1.0f) mHeartPhase -= 1.0f;
@@ -408,14 +608,15 @@ void AudioEngine::renderBlock(int16_t* out, int frames) {
         float rumble = mRumbleLp * (2.2f + 5.0f * tension);
 
         float bed = hb + br + drone + rumble * 0.35f;
-        dryL += bed;
-        dryR += bed;
+        dryL += bed + bedL * 0.85f;
+        dryR += bed + bedR * 0.85f;
         send += (drone + rumble) * 0.5f;
 
         // --- reverb ---
-        float rv = reverb(send * 0.5f);
-        float outL = dryL + rv * 0.42f;
-        float outR = dryR + rv * 0.38f;
+        float rv = reverb(send * 0.5f, indoor);
+        float wet = lerpf(0.42f, 0.30f, indoor);
+        float outL = dryL + rv * wet;
+        float outR = dryR + rv * (wet - 0.04f);
 
         // Muffle: used on death and when the creature is on top of you, so the
         // world drops away and only the heartbeat is left.
@@ -433,6 +634,8 @@ void AudioEngine::renderBlock(int16_t* out, int frames) {
         out[i * 2 + 0] = (int16_t)(clampf(outL, -1.0f, 1.0f) * 32000.0f);
         out[i * 2 + 1] = (int16_t)(clampf(outR, -1.0f, 1.0f) * 32000.0f);
     }
+
+    mVoiceBusy.store(anyDialogue ? 1.0f : 0.0f);
 }
 
 // ------------------------------------------------------------------- OpenSL ES
@@ -443,6 +646,7 @@ void AudioEngine::renderBlock(int16_t* out, int frames) {
 // allocated so renderBlock() behaves exactly as it does on a phone.
 bool AudioEngine::start() {
     if (mRunning) return true;
+    buildSampleTable();
     const int combLen[NCOMB] = {1687, 1601, 2053, 2251};
     const int apLen[NAP] = {389, 127};
     for (int i = 0; i < NCOMB; i++) mComb[i].assign(combLen[i], 0.0f);
@@ -475,6 +679,7 @@ void AudioEngine::enqueueNext() {
 
 bool AudioEngine::start() {
     if (mRunning) return true;
+    buildSampleTable();
 
     // Reverb delay lines - mutually prime lengths avoid a metallic ring.
     const int combLen[NCOMB] = {1687, 1601, 2053, 2251};
