@@ -1,5 +1,6 @@
 #include "game.h"
 #include "platform.h"
+#include "hud_math.h"
 #include "noise.h"
 #include "matids.h"
 #include <android/log.h>
@@ -78,12 +79,14 @@ void Game::loadProgress() {
     FILE* f = std::fopen(mSavePath.c_str(), "rb");
     if (!f) return;
     int v = 0, u = 1;
-    if (std::fread(&v, sizeof(int), 1, f) == 1 && v == 3) {
+    if (std::fread(&v, sizeof(int), 1, f) == 1 && v == 4) {
         if (std::fread(&u, sizeof(int), 1, f) == 1)
             mUnlocked = (int)clampf((float)u, 1.0f, (float)MISSION_COUNT);
-        float b = 1.0f;
-        if (std::fread(&b, sizeof(float), 1, f) == 1)
-            mBrightness = clampf(b, 0.55f, 2.6f);
+        float b = 1.0f, sens = 1.0f;
+        int inv = 0;
+        if (std::fread(&b, sizeof(float), 1, f) == 1) mBrightness = clampf(b, 0.55f, 2.6f);
+        if (std::fread(&sens, sizeof(float), 1, f) == 1) mSensitivity = clampf(sens, 0.4f, 2.5f);
+        if (std::fread(&inv, sizeof(int), 1, f) == 1) mInvertY = inv != 0;
     }
     std::fclose(f);
 }
@@ -91,10 +94,13 @@ void Game::loadProgress() {
 void Game::saveProgress() {
     FILE* f = std::fopen(mSavePath.c_str(), "wb");
     if (!f) return;
-    int v = 3;
+    int v = 4;
+    int inv = mInvertY ? 1 : 0;
     std::fwrite(&v, sizeof(int), 1, f);
     std::fwrite(&mUnlocked, sizeof(int), 1, f);
     std::fwrite(&mBrightness, sizeof(float), 1, f);
+    std::fwrite(&mSensitivity, sizeof(float), 1, f);
+    std::fwrite(&inv, sizeof(int), 1, f);
     std::fclose(f);
 }
 
@@ -257,6 +263,8 @@ void Game::buildSmallMeshes() {
 
 void Game::startNewGame() {
     mPlayer.reset(mWorld.playerStart);
+    mPlayer.lookSensitivity = mSensitivity;
+    mPlayer.invertY = mInvertY;
     mFlares = 3;
     mDamage = 0.0f;
     for (int i = 0; i < MAX_NPCS; i++) mNpcs[i].active = false;
@@ -401,9 +409,9 @@ void Game::onTouchMove(int id, float x, float y) {
     t->x = x; t->y = y;
     if (std::fabs(x - t->startX) + std::fabs(y - t->startY) > 12.0f * mUiScale) t->moved = true;
     if (t->role == 2) {
-        float sens = 0.0038f / mUiScale;
-        mPlayer.lookInput.x += dx * sens;
-        mPlayer.lookInput.y += -dy * sens;
+        // All sign conventions live in applyLookDrag, so the touch layer and
+        // the control tests cannot disagree about which way is right.
+        mPlayer.applyLookDrag(dx, dy, 1.0f / mUiScale);
     }
 }
 
@@ -416,27 +424,43 @@ void Game::onTouchUp(int id, float x, float y) {
     if (slot == mLookTouch) mLookTouch = -1;
 
     if (mState == GS_TITLE && !t->moved) {
-        float s2 = mUiScale;
-        float w = (float)mR.width(), h = (float)mR.height();
-        float by = h * 0.60f + 8.0f * s2;
-        float r = 34.0f * s2;
-        float dxm = x - (w * 0.5f - 150.0f * s2), dym = y - by;
-        float dxp = x - (w * 0.5f + 150.0f * s2);
-        if (dxm * dxm + dym * dym < r * r) {
+        TitleLayout L = titleLayout();
+        auto hit = [&](float bx, float by, float br) {
+            float ddx = x - bx, ddy = y - by;
+            return ddx * ddx + ddy * ddy < br * br * 1.6f;
+        };
+        if (hit(L.startX, L.startY, L.startR)) {
+            startNewGame();
+        } else if (hit(L.minusX, L.rowY[0], L.rowR)) {
             mBrightness = clampf(mBrightness - 0.10f, 0.55f, 2.6f);
             saveProgress();
             audio.postUI(SND_RADIO_BEEP, 0.35f, 0.9f);
-        } else if (dxp * dxp + dym * dym < r * r) {
+        } else if (hit(L.plusX, L.rowY[0], L.rowR)) {
             mBrightness = clampf(mBrightness + 0.10f, 0.55f, 2.6f);
             saveProgress();
             audio.postUI(SND_RADIO_BEEP, 0.35f, 1.1f);
-        } else {
-            startNewGame();
+        } else if (hit(L.minusX, L.rowY[1], L.rowR)) {
+            mSensitivity = clampf(mSensitivity - 0.1f, 0.4f, 2.5f);
+            mPlayer.lookSensitivity = mSensitivity;
+            saveProgress();
+            audio.postUI(SND_RADIO_BEEP, 0.35f, 0.9f);
+        } else if (hit(L.plusX, L.rowY[1], L.rowR)) {
+            mSensitivity = clampf(mSensitivity + 0.1f, 0.4f, 2.5f);
+            mPlayer.lookSensitivity = mSensitivity;
+            saveProgress();
+            audio.postUI(SND_RADIO_BEEP, 0.35f, 1.1f);
+        } else if (hit(L.plusX, L.rowY[2], L.rowR)) {
+            mInvertY = !mInvertY;
+            mPlayer.invertY = mInvertY;
+            saveProgress();
+            audio.postUI(SND_RADIO_BEEP, 0.35f, mInvertY ? 1.2f : 0.8f);
         }
     } else if (mState == GS_DEAD && mStateTime > 2.6f) {
         // Death restarts the current job, not the game: losing an hour of
         // open-world progress is not a horror beat, it is just a punishment.
         mPlayer.reset(mWorld.playerStart);
+        mPlayer.lookSensitivity = mSensitivity;
+        mPlayer.invertY = mInvertY;
         mFlares = std::max(mFlares, 2);
         startMission(mMission.index);
     } else if (mState == GS_MISSION_DONE && mStateTime > 2.0f) {
@@ -549,8 +573,7 @@ void Game::updatePlay(float dt) {
     if (mStickTouch >= 0 && mTouch[mStickTouch].active) {
         Touch& t = mTouch[mStickTouch];
         float maxR = 90.0f * mUiScale;
-        mPlayer.moveInput = vec2(clampf((t.x - t.startX) / maxR, -1.0f, 1.0f),
-                                 clampf((t.startY - t.y) / maxR, -1.0f, 1.0f));
+        mPlayer.applyStick(t.x - t.startX, t.y - t.startY, maxR);
     } else {
         mPlayer.moveInput = vec2(0, 0);
     }
@@ -1085,43 +1108,85 @@ void Game::render() {
     mR.uiEnd();
 }
 
+Game::TitleLayout Game::titleLayout() const {
+    float s = mUiScale;
+    float w = (float)mR.width(), h = (float)mR.height();
+    TitleLayout L;
+    L.startX = w * 0.5f;
+    L.startY = h * 0.40f;
+    L.startR = 54.0f * s;
+    float top = h * 0.585f;
+    float gap = 62.0f * s;
+    for (int i = 0; i < 3; i++) L.rowY[i] = top + i * gap;
+    L.minusX = w * 0.5f - 155.0f * s;
+    L.plusX = w * 0.5f + 155.0f * s;
+    L.rowR = 30.0f * s;
+    return L;
+}
+
 void Game::renderTitle() {
     float s = mUiScale;
     float w = (float)mR.width(), h = (float)mR.height();
     float pulse = 0.75f + 0.25f * std::sin(mTime * 1.1f);
 
-    mR.uiTextCentered("HOLLOW SIGNAL", w * 0.5f, h * 0.22f, 58.0f * s, 0.86f, 0.84f, 0.80f, pulse);
-    mR.uiQuad(w * 0.5f - 170.0f * s, h * 0.22f + 76.0f * s, 340.0f * s, 1.5f * s,
+    TitleLayout L = titleLayout();
+
+    mR.uiTextCentered("HOLLOW SIGNAL", w * 0.5f, h * 0.13f, 52.0f * s, 0.86f, 0.84f, 0.80f, pulse);
+    mR.uiQuad(w * 0.5f - 170.0f * s, h * 0.13f + 68.0f * s, 340.0f * s, 1.5f * s,
               0.35f, 0.36f, 0.38f, 0.7f);
     mR.uiTextCentered("AN OPEN CITY. SIXTEEN JOBS. ONE WAY OUT.",
-                      w * 0.5f, h * 0.22f + 98.0f * s, 16.0f * s, 0.45f, 0.46f, 0.48f, 0.9f);
+                      w * 0.5f, h * 0.13f + 86.0f * s, 15.0f * s, 0.45f, 0.46f, 0.48f, 0.9f);
 
     char line[96];
     std::snprintf(line, sizeof(line), "PROGRESS  %d / %d", mUnlocked, MISSION_COUNT);
-    mR.uiTextCentered(line, w * 0.5f, h * 0.47f, 20.0f * s, 0.70f, 0.70f, 0.68f, 0.9f);
+    mR.uiTextCentered(line, w * 0.5f, h * 0.28f, 18.0f * s, 0.62f, 0.62f, 0.60f, 0.9f);
 
-    // Brightness. Every horror game ships one of these because "as dark as it
-    // should be" depends entirely on the screen and the room.
-    float by = h * 0.60f;
-    std::snprintf(line, sizeof(line), "BRIGHTNESS  %d%%", (int)(mBrightness * 100.0f));
-    mR.uiTextCentered(line, w * 0.5f, by, 18.0f * s, 0.72f, 0.72f, 0.70f, 0.9f);
-    mR.uiDisc(w * 0.5f - 150.0f * s, by + 8.0f * s, 26.0f * s, 0.8f, 0.8f, 0.84f, 0.18f);
-    mR.uiDisc(w * 0.5f + 150.0f * s, by + 8.0f * s, 26.0f * s, 0.8f, 0.8f, 0.84f, 0.18f);
-    mR.uiTextCentered("-", w * 0.5f - 150.0f * s, by + 1.0f * s, 22.0f * s, 0.95f, 0.95f, 0.95f, 0.9f);
-    mR.uiTextCentered("+", w * 0.5f + 150.0f * s, by + 1.0f * s, 22.0f * s, 0.95f, 0.95f, 0.95f, 0.9f);
+    // An explicit start button rather than tap-anywhere: with settings on the
+    // same screen, tap-anywhere means every mis-aimed press launches a run.
+    float sp = 0.5f + 0.35f * std::sin(mTime * 2.2f);
+    mR.uiDisc(L.startX, L.startY, L.startR, 0.75f, 0.78f, 0.72f, 0.16f + 0.10f * sp);
+    mR.uiRing(L.startX, L.startY, L.startR, 2.5f * s, 0.80f, 0.84f, 0.78f, 0.55f + 0.35f * sp);
+    mR.uiTextCentered("START", L.startX, L.startY - 9.0f * s, 20.0f * s,
+                      0.92f, 0.94f, 0.90f, 0.95f);
 
-    // A calibration strip: the rightmost bar should be just barely visible.
-    float sw = 40.0f * s, sx = w * 0.5f - sw * 2.5f, sy = by + 46.0f * s;
+    // Settings rows. Each is: label, value, and a pair of press targets.
+    auto row = [&](int i, const char* label, const char* value, bool showPlusMinus) {
+        float y = L.rowY[i];
+        mR.uiText(label, w * 0.5f - 250.0f * s, y - 7.0f * s, 16.0f * s,
+                  0.60f, 0.60f, 0.58f, 0.9f);
+        mR.uiTextCentered(value, w * 0.5f, y - 8.0f * s, 18.0f * s, 0.85f, 0.85f, 0.82f, 0.95f);
+        if (!showPlusMinus) return;
+        mR.uiDisc(L.minusX, y, L.rowR, 0.8f, 0.8f, 0.84f, 0.16f);
+        mR.uiDisc(L.plusX, y, L.rowR, 0.8f, 0.8f, 0.84f, 0.16f);
+        mR.uiRing(L.minusX, y, L.rowR, 1.8f * s, 0.8f, 0.8f, 0.84f, 0.4f);
+        mR.uiRing(L.plusX, y, L.rowR, 1.8f * s, 0.8f, 0.8f, 0.84f, 0.4f);
+        mR.uiTextCentered("-", L.minusX, y - 10.0f * s, 22.0f * s, 0.95f, 0.95f, 0.95f, 0.9f);
+        mR.uiTextCentered("+", L.plusX, y - 10.0f * s, 22.0f * s, 0.95f, 0.95f, 0.95f, 0.9f);
+    };
+
+    std::snprintf(line, sizeof(line), "%d%%", (int)(mBrightness * 100.0f));
+    row(0, "BRIGHTNESS", line, true);
+    std::snprintf(line, sizeof(line), "%.2fx", mSensitivity);
+    row(1, "LOOK SPEED", line, true);
+    row(2, "INVERT LOOK Y", mInvertY ? "ON" : "OFF", false);
+    {
+        float y = L.rowY[2];
+        mR.uiDisc(L.plusX, y, L.rowR, mInvertY ? 0.55f : 0.30f,
+                  mInvertY ? 0.85f : 0.32f, mInvertY ? 0.60f : 0.34f, 0.30f);
+        mR.uiRing(L.plusX, y, L.rowR, 1.8f * s, 0.8f, 0.8f, 0.84f, 0.4f);
+        mR.uiTextCentered(mInvertY ? "ON" : "OFF", L.plusX, y - 6.0f * s, 13.0f * s,
+                          0.95f, 0.95f, 0.95f, 0.9f);
+    }
+
+    // Calibration strip: the leftmost bar should be at the edge of visible.
+    float sw = 38.0f * s, sx = w * 0.5f - sw * 2.5f, sy = L.rowY[2] + 46.0f * s;
     for (int i = 0; i < 5; i++) {
         float v = 0.02f + i * 0.022f;
-        mR.uiQuad(sx + i * sw, sy, sw - 3.0f * s, 22.0f * s, v, v, v * 1.1f, 1.0f);
+        mR.uiQuad(sx + i * sw, sy, sw - 3.0f * s, 18.0f * s, v, v, v * 1.1f, 1.0f);
     }
-    mR.uiTextCentered("RAISE UNTIL THE LEFTMOST BAR IS JUST VISIBLE",
-                      w * 0.5f, sy + 30.0f * s, 12.0f * s, 0.45f, 0.45f, 0.46f, 0.8f);
-
-    mR.uiTextCentered("TAP TO BEGIN", w * 0.5f, h - 110.0f * s, 20.0f * s,
-                      0.60f, 0.60f, 0.60f, 0.5f + 0.35f * std::sin(mTime * 2.2f));
-    mR.uiTextCentered("HEADPHONES RECOMMENDED", w * 0.5f, h - 64.0f * s, 13.0f * s,
+    mR.uiTextCentered("RAISE BRIGHTNESS UNTIL THE LEFTMOST BAR IS JUST VISIBLE",
+                      w * 0.5f, sy + 24.0f * s, 11.0f * s, 0.42f, 0.42f, 0.44f, 0.8f);
+    mR.uiTextCentered("HEADPHONES RECOMMENDED", w * 0.5f, h - 26.0f * s, 12.0f * s,
                       0.38f, 0.38f, 0.40f, 0.7f);
 }
 
@@ -1151,9 +1216,9 @@ void Game::renderCompass() {
 
     vec3 to = goal - mPlayer.pos;
     to.y = 0.0f;
-    float rel = std::atan2(to.x, to.z) - mPlayer.yaw;
-    while (rel > PI) rel -= TAU;
-    while (rel < -PI) rel += TAU;
+    // Positive bearing means the objective is to the player's right, so it
+    // belongs on the right of the strip.
+    float rel = relativeBearing(to, mPlayer.yaw);
 
     // Clamped to the ends of the strip so the marker never vanishes entirely.
     float t = clampf(rel / (PI * 0.6f), -1.0f, 1.0f);
@@ -1180,33 +1245,33 @@ void Game::renderMiniMap() {
     mWorld.worldToCell(mPlayer.pos, pcx, pcz);
     int cells = (int)(range / mWorld.cellSize);
     float px = size / (cells * 2.0f);
-    float cs = std::cos(-mPlayer.yaw), sn = std::sin(-mPlayer.yaw);
+    float ppm = px / mWorld.cellSize;          // pixels per metre
+    float ccx = mx + size * 0.5f, ccy = my + size * 0.5f;
+
     for (int dz = -cells; dz < cells; dz++) {
         for (int dx = -cells; dx < cells; dx++) {
             int x = pcx + dx, z = pcz + dz;
             if (!mWorld.inBounds(x, z) || !mWorld.solid(x, z)) continue;
-            // Rotate into view space so the map turns with the player.
-            float rx = dx * cs - dz * sn;
-            float rz = dx * sn + dz * cs;
-            float sx = mx + size * 0.5f + rx * px;
-            float sy = my + size * 0.5f + rz * px;
+            // Rotate into the player's frame so the map turns with them and
+            // what is ahead of you is drawn above you.
+            vec2 o = minimapOffset(vec3(dx * mWorld.cellSize, 0, dz * mWorld.cellSize),
+                                   mPlayer.yaw, ppm);
+            float sx = ccx + o.x, sy = ccy + o.y;
             if (sx < mx || sx > mx + size - px || sy < my || sy > my + size - px) continue;
             mR.uiQuad(sx, sy, px + 0.6f, px + 0.6f, 0.30f, 0.31f, 0.34f, 0.75f);
         }
     }
 
-    mR.uiDisc(mx + size * 0.5f, my + size * 0.5f, 4.0f * s, 0.9f, 0.9f, 0.92f, 0.95f);
+    // The player, drawn as a chevron so "up is where I am facing" is explicit.
+    mR.uiDisc(ccx, ccy, 4.0f * s, 0.9f, 0.9f, 0.92f, 0.95f);
+    mR.uiQuad(ccx - 1.0f * s, ccy - 11.0f * s, 2.0f * s, 8.0f * s, 0.9f, 0.9f, 0.92f, 0.8f);
 
-    float scale = px / mWorld.cellSize;
     if (mMission.active) {
-        vec3 to = mMission.marker - mPlayer.pos;
-        float rx = (to.x * cs - to.z * sn) * scale;
-        float ry = (to.x * sn + to.z * cs) * scale;
+        vec2 o = minimapOffset(mMission.marker - mPlayer.pos, mPlayer.yaw, ppm);
         float lim = size * 0.46f;
-        float l = std::sqrt(rx * rx + ry * ry);
-        if (l > lim && l > 0.001f) { rx = rx / l * lim; ry = ry / l * lim; }
-        mR.uiDisc(mx + size * 0.5f + rx, my + size * 0.5f + ry, 5.0f * s,
-                  0.45f, 0.95f, 0.60f, 0.95f);
+        float l = std::sqrt(o.x * o.x + o.y * o.y);
+        if (l > lim && l > 0.001f) { o.x = o.x / l * lim; o.y = o.y / l * lim; }
+        mR.uiDisc(ccx + o.x, ccy + o.y, 5.0f * s, 0.45f, 0.95f, 0.60f, 0.95f);
     }
 
     // Only monsters close enough that you would already hear them. Showing all
@@ -1216,10 +1281,8 @@ void Game::renderMiniMap() {
         if (!m.active) continue;
         float d = m.distanceTo(mPlayer.pos);
         if (d > 18.0f) continue;
-        vec3 to = m.pos - mPlayer.pos;
-        float rx = (to.x * cs - to.z * sn) * scale;
-        float ry = (to.x * sn + to.z * cs) * scale;
-        mR.uiDisc(mx + size * 0.5f + rx, my + size * 0.5f + ry, 4.0f * s,
+        vec2 o = minimapOffset(m.pos - mPlayer.pos, mPlayer.yaw, ppm);
+        mR.uiDisc(ccx + o.x, ccy + o.y, 4.0f * s,
                   0.85f, 0.20f, 0.18f, 0.35f + 0.45f * (1.0f - d / 18.0f));
     }
 }

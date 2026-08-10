@@ -8,7 +8,7 @@ Written in **C++** (engine), **C** (asset-pack validator, NDK glue),
 **Kotlin** (app shell, lifecycle, audio focus, save mirror) and **Java**
 (haptics, device tiering).
 
-**Prebuilt APK: [`dist/HollowSignal-2.1.apk`](dist/HollowSignal-2.1.apk)** —
+**Prebuilt APK: [`dist/HollowSignal-2.2.apk`](dist/HollowSignal-2.2.apk)** —
 64 MB, signed, arm64-v8a + armeabi-v7a, Android 5.0 (API 21) and up.
 
 ---
@@ -42,6 +42,8 @@ Left half of the screen is a floating movement stick — thumb anywhere. Right
 half is look. Bottom right: **RUN**, **CROUCH**, **LIGHT**, **FLARE**. A
 context button appears when you can **TAKE**, **HOLD** or **HELP**. Compass
 strip along the top, rotating minimap top right. Back returns to the title.
+
+Brightness, look speed and invert-Y are on the title screen and are saved.
 
 ---
 
@@ -253,9 +255,18 @@ signing key cannot be changed after release.
 ## Tests
 
 ```sh
-./tests/run_tests.sh          # 61 voice + 11 render + 177 engine checks
+./tests/run_tests.sh   # 61 voice + 173 control + 11 render + 177 engine checks
 python3 tests/check_shaders.py
 ```
+
+`tests/controls_test.cpp` asks whether the game moves and points where the
+player meant, and phrases every check in terms of what reaches the screen
+rather than in terms of the maths. "Strafe right" is verified by pushing the
+movement through the same view matrix the renderer uses and confirming the
+player went toward screen-right; "look right" by confirming a landmark ahead
+slides left afterwards. That framing is the point: the bug it was written for
+was a basis vector that was self-consistent, internally sensible, and exactly
+backwards.
 
 `tests/render_test.cpp` renders actual frames through desktop Mesa on an EGL
 pbuffer and inspects the pixels. It cannot say anything about performance on a
@@ -277,7 +288,15 @@ the mixer never emits a non-finite sample, that the pack reader rejects
 corrupt input, and that four minutes of simulated play per monster type
 produces the behaviour the design calls for.
 
-These caught eleven genuine bugs. The most instructive:
+These caught fifteen genuine bugs. The most instructive:
+
+- **Strafing was mirrored.** `Player::right()` returned the negation of
+  `cross(forward, up)` — the vector the view matrix puts along screen-X and
+  the vector the audio mixer pans against. Pressing left moved you right. The
+  same handedness confusion had inverted the look-X axis, mirrored the compass,
+  and left the minimap rotated 180 degrees. Sign conventions now live in one
+  place each (`Player::applyLookDrag`, `hud_math.h`) so a call site cannot
+  disagree with a test.
 
 - **Three separate causes of the black screen in 2.0**, none of which any
   simulation test could see. The material texture arrays were allocated with

@@ -22,6 +22,13 @@ clang++ -std=c++17 -O2 -Wall \
     "$DIR/voice_test.cpp" "$CPP/speech.cpp" \
     -o "$OUT/hollow_voice_tests"
 
+clang++ -std=c++17 -O2 -Wall \
+    "$DIR/controls_test.cpp" \
+    "$CPP/player.cpp" "$CPP/world.cpp" "$CPP/audio.cpp" \
+    "$CPP/assets.cpp" "$CPP/speech.cpp" \
+    "$OUT/pak_verify.o" -DHOLLOW_NO_OPENSL \
+    -o "$OUT/hollow_controls_tests"
+
 # Headless render test, if a GL implementation is available. This is the one
 # that catches "the whole screen is black" - see tests/render_test.cpp.
 if clang++ -std=c++17 -O1 -Wall \
@@ -37,6 +44,8 @@ else
 fi
 
 "$OUT/hollow_voice_tests"
+echo
+"$OUT/hollow_controls_tests"
 echo
 if [ "$RENDER" = "1" ]; then
     LIBGL_ALWAYS_SOFTWARE=1 "$OUT/hollow_render_tests" "$ROOT/app/src/main/assets/hollow.pak"

@@ -25,7 +25,40 @@ vec3 Player::forward() const {
 }
 
 vec3 Player::right() const {
-    return {std::cos(yaw), 0.0f, -std::sin(yaw)};
+    // cross(forward, up), which is the vector mat4::lookAt puts along screen-X
+    // and the vector the audio mixer pans against. This used to return the
+    // negation of that, so strafing left moved you right - self-consistent,
+    // and exactly backwards against the camera and the sound.
+    return {-std::cos(yaw), 0.0f, std::sin(yaw)};
+}
+
+void Player::applyStick(float dx, float dy, float maxRadius) {
+    float len = std::sqrt(dx * dx + dy * dy);
+    if (len < 1e-5f || maxRadius < 1e-5f) { moveInput = vec2(0, 0); return; }
+
+    float mag = len / maxRadius;
+    // Dead zone. Without one, a thumb resting on the glass creeps the player
+    // forward, which in this game means walking into things in the dark while
+    // believing you are standing still.
+    if (mag < STICK_DEADZONE) { moveInput = vec2(0, 0); return; }
+    // Rescale so the usable range still reaches full speed at the rim.
+    mag = clampf((mag - STICK_DEADZONE) / (1.0f - STICK_DEADZONE), 0.0f, 1.0f);
+
+    // Radial, not per-axis. Clamping x and y independently makes the stick a
+    // square: pushing diagonally would reach a magnitude of 1.41 and move you
+    // faster than pushing straight ahead.
+    moveInput = vec2(dx / len * mag, -dy / len * mag);
+}
+
+void Player::applyLookDrag(float dx, float dy, float scale) {
+    const float base = 0.0038f;
+    float s = base * scale * lookSensitivity;
+    // Dragging right turns right. Increasing yaw rotates forward toward
+    // -right (see hud_math.h), so a rightward drag has to decrease yaw.
+    lookInput.x -= dx * s;
+    // Screen y grows downward, so an upward drag is a negative dy and must
+    // raise the pitch.
+    lookInput.y += (invertY ? dy : -dy) * s;
 }
 
 vec3 Player::eye() const {

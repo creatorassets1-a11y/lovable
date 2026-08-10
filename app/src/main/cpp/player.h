@@ -17,6 +17,10 @@ struct Player {
     bool sprintHeld = false;
     bool crouchHeld = false;
 
+    // Look options, persisted with the save.
+    float lookSensitivity = 1.0f;
+    bool  invertY = false;
+
     float stamina = 1.0f;
     float battery = 1.0f;
     bool  torchOn = true;
@@ -37,6 +41,19 @@ struct Player {
     float eyeHeight = EYE_STAND;
 
     void reset(const vec3& start);
+
+    // Feeds a screen-space drag into the look input: dx to the right, dy down,
+    // both in pixels. `scale` compensates for screen density.
+    //
+    // The sign conventions live here rather than at the call site so the touch
+    // handler and the control tests cannot drift apart - which is exactly how
+    // the strafe direction ended up inverted.
+    void applyLookDrag(float dx, float dy, float scale);
+
+    // Feeds a virtual-stick deflection, in pixels from where the thumb first
+    // landed, with the same screen convention (+x right, +y down).
+    void applyStick(float dx, float dy, float maxRadius);
+    static constexpr float STICK_DEADZONE = 0.14f;
     void update(float dt, const World& w, AudioEngine& audio, float creatureDist, bool creatureVisible);
 
     vec3 eye() const;

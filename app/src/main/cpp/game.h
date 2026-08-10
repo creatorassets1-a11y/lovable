@@ -91,6 +91,8 @@ private:
     bool  mPackOk = false;
 
     float mBrightness = 1.15f;   // player-set exposure, persisted
+    float mSensitivity = 1.0f;   // look sensitivity, persisted
+    bool  mInvertY = false;      // persisted
     bool  mOnDoorway = false;    // edge-detects crossing a threshold
     int   mFlares = 3;
     float mFlareCooldown = 0.0f;
@@ -147,6 +149,16 @@ private:
     void gatherLights(SceneParams& sp);
     void renderWorld(const SceneParams& sp, bool shadowPass);
     void renderHud();
+    // Geometry of the title screen, computed once and used by both the drawing
+    // and the hit-testing so a control can never be drawn somewhere you cannot
+    // press.
+    struct TitleLayout {
+        float startX, startY, startR;
+        float rowY[3];          // brightness, sensitivity, invert-Y
+        float minusX, plusX;
+        float rowR;
+    };
+    TitleLayout titleLayout() const;
     void renderTitle();
     void renderOverlayText();
     void renderCompass();
