@@ -1,0 +1,16 @@
+# Build output
+build/
+.gradle/
+app/.cxx/
+local.properties
+
+# Signing material must never be committed. See README for how to generate
+# your own key; the one used for the prebuilt APK in dist/ is throwaway.
+*.jks
+*.keystore
+*.idsig
+
+# Editors / OS
+.idea/
+*.iml
+.DS_Store
