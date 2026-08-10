@@ -8,7 +8,11 @@
 #include "hmath.h"
 #include "mesh.h"
 #include "assets.h"
+#if defined(__ANDROID__)
 #include <GLES3/gl3.h>
+#else
+#include <GLES3/gl3.h>   // desktop Mesa ships the same headers
+#endif
 
 namespace hm {
 
@@ -42,6 +46,11 @@ struct SceneParams {
     float lightRadius[MAX_POINT_LIGHTS];
 
     vec3 ambient{0.020f, 0.021f, 0.026f};
+    // A weak directional fill standing in for moonlight. Without it an
+    // unlit exterior is a void: you cannot tell a building from an alley, and
+    // the city stops existing outside the torch cone.
+    vec3 moonDir{0.35f, -0.82f, 0.45f};
+    vec3 moonColor{0.0f, 0.0f, 0.0f};
     vec3 fogColor{0.02f, 0.02f, 0.03f};
     float fogDensity = 0.09f;
     float time = 0.0f;
@@ -78,7 +87,8 @@ public:
 
     // fear drives grain/aberration, fade is the black curtain, damage is the
     // red pulse when the creature reaches you.
-    void postProcess(float fear, float time, float fade, float damage);
+    void postProcess(float fear, float time, float fade, float damage,
+                     float exposure = 1.0f);
 
     void uiBegin();
     void uiQuad(float x, float y, float w, float h, float r, float g, float b, float a);
@@ -115,8 +125,10 @@ private:
     GLint uTorchPos = -1, uTorchDir = -1, uTorchColor = -1, uTorchParams = -1;
     GLint uNumLights = -1, uLightPosArr = -1, uLightColArr = -1, uLightRadArr = -1;
     GLint uAmbient = -1, uFogColor = -1, uFogDensity = -1;
+    GLint uMoonDir = -1, uMoonColor = -1;
     GLint dMVP = -1;
     GLint pTex = -1, pFear = -1, pTime = -1, pFade = -1, pDamage = -1, pAspect = -1;
+    GLint pExposure = -1;
     GLint uScreen = -1, uUiTex = -1;
 
     static const int SHADOW_SIZE = 1024;
@@ -129,6 +141,7 @@ private:
     void destroyTargets();
     void forgetGlState();
     bool buildMaterialArrays(const AssetPack* pack);
+    void buildFallbackMaterials();
     void buildFont();
     void extractFrustum(const mat4& viewProj);
     void uiPushQuad(float x0, float y0, float x1, float y1,

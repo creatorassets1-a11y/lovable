@@ -43,6 +43,11 @@ enum SoundId : int {
     SND_NPC_SOB,
     SND_NPC_RUN,
     SND_NPC_FOLLOW,
+    // Friction sounds, baked from a stick-slip model.
+    SND_CREAK_DOOR,
+    SND_CREAK_FLOOR,
+    SND_CREAK_METAL,
+    SND_GROAN_STRUCT,
     SND_COUNT
 };
 

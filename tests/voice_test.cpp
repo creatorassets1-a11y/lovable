@@ -246,6 +246,57 @@ int main() {
         }
     }
 
+    // Roughness: 30-150Hz amplitude modulation is the acoustic signature that
+    // separates a scream from a shout (Arnal et al., Current Biology 2015).
+    // Ordinary speech modulates at 4-5Hz and never enters that band, so this
+    // is a real discriminator rather than a restatement of the parameters.
+    std::printf("\n[roughness] the 30-150Hz modulation band\n");
+    {
+        VoiceProfile vp;
+        vp.pitch = 150.0f;
+        RadioProfile dry;
+        dry.enabled = false;
+
+        // The chitter is deliberately not held to the same bar. It is an
+        // insectile clicking, not a cry: its character comes from a fast
+        // syllabic pulse, which puts much of its modulation energy below the
+        // scream band. It still has to be far rougher than speech.
+        struct Case { VocalType t; const char* name; bool shouldBeRough; };
+        const Case cases[] = {
+            {VOC_SCREAM,          "scream",  true},
+            {VOC_MONSTER_ROAR,    "roar",    true},
+            {VOC_MONSTER_WAIL,    "wail",    true},
+            {VOC_MONSTER_CHITTER, "chitter", false},
+            {VOC_GASP,            "gasp",    false},
+        };
+        float chitterRough = 0.0f;
+        float screamRough = 0.0f, speechRough = 0.0f;
+        for (const Case& c : cases) {
+            VoiceProfile v2 = vp;
+            if (c.t >= VOC_MONSTER_ROAR) v2.pitch = 64.0f;
+            std::vector<float> pcm = synthesizeVocal(c.t, v2, rate, 11u + c.t);
+            float rough = measureRoughness(pcm, rate);
+            std::printf("  %-8s roughness %.3f  %s\n", c.name, rough,
+                        c.shouldBeRough ? "(should be rough)" : "(should not be)");
+            if (c.t == VOC_SCREAM) screamRough = rough;
+            if (c.t == VOC_MONSTER_CHITTER) chitterRough = rough;
+            if (c.shouldBeRough)
+                check(rough > 0.35f, "a scream or monster cry carries real roughness");
+        }
+
+        // A spoken line must NOT be rough - that is the whole contrast.
+        VoiceProfile speech{104.0f, 0.16f, 0.97f, 0.09f, 1.0f, 0.009f, 0.04f, 0.004f};
+        std::vector<float> line = synthesizeUtterance(
+            "G EH1 T . T UW . DH AH . S AH1 B S T EY SH AH N", speech, dry, rate, 3);
+        speechRough = measureRoughness(line, rate);
+        std::printf("  speech   roughness %.3f  (should not be)\n", speechRough);
+        check(speechRough < screamRough, "speech is measurably less rough than a scream");
+        check(screamRough > speechRough * 1.5f,
+              "the scream sits clearly inside the band and speech does not");
+        check(chitterRough > speechRough * 1.5f,
+              "even the chitter is far rougher than speech");
+    }
+
     std::printf("\n=== %d checks, %d failures ===\n", gChecks, gFails);
     return gFails ? 1 : 0;
 }

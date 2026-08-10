@@ -448,17 +448,29 @@ std::vector<float> synthesizeVocal(VocalType type, const VoiceProfile& voice,
     uint32_t rng = seed ? seed : 7u;
     float fs = (float)sampleRate;
 
-    struct Spec { float dur; float f0a, f0b; float f1, f2, f3; float noise; float rough; };
+    // `amFreq` and `amDepth` are the important columns.
+    //
+    // Arnal et al. (Current Biology, 2015) showed that what separates a scream
+    // from any other vocalisation is "roughness": amplitude modulation in the
+    // 30-150Hz band, which ordinary speech never enters (speech modulates at
+    // 4-5Hz). That band reaches the amygdala over a shorter path than the
+    // auditory cortex, and listeners rate the roughest screams as the most
+    // frightening. Cycle-to-cycle jitter alone produces only a little of it,
+    // so the modulation is applied explicitly here.
+    struct Spec {
+        float dur; float f0a, f0b; float f1, f2, f3;
+        float noise; float rough; float amFreq; float amDepth;
+    };
     static const Spec kSpec[VOC_COUNT] = {
-        // dur   f0 start/end     F1    F2    F3    noise  rough
-        {1.90f, 1.85f, 1.35f,  850, 1500, 2600, 0.30f, 0.55f},  // SCREAM
-        {0.65f, 1.10f, 0.85f,  600, 1300, 2400, 0.75f, 0.10f},  // GASP
-        {1.10f, 1.30f, 0.80f,  620, 1150, 2350, 0.25f, 0.35f},  // PAIN
-        {1.70f, 0.95f, 0.70f,  480, 1100, 2300, 0.35f, 0.25f},  // SOB
-        {2.10f, 1.05f, 0.75f,  620, 1250, 2400, 0.30f, 0.45f},  // LAUGH_BROKEN
-        {2.30f, 0.42f, 0.30f,  320,  780, 1900, 0.45f, 0.85f},  // MONSTER_ROAR
-        {2.90f, 0.70f, 1.25f,  520, 1450, 2700, 0.35f, 0.70f},  // MONSTER_WAIL
-        {1.40f, 1.60f, 1.50f,  700, 2100, 3200, 0.55f, 0.90f},  // MONSTER_CHITTER
+        // dur   f0 start/end     F1    F2    F3    noise  rough  amHz  amDepth
+        {1.90f, 1.85f, 1.35f,  850, 1500, 2600, 0.30f, 0.55f,  78.0f, 0.80f},  // SCREAM
+        {0.65f, 1.10f, 0.85f,  600, 1300, 2400, 0.75f, 0.10f,   0.0f, 0.00f},  // GASP
+        {1.10f, 1.30f, 0.80f,  620, 1150, 2350, 0.25f, 0.35f,  52.0f, 0.55f},  // PAIN
+        {1.70f, 0.95f, 0.70f,  480, 1100, 2300, 0.35f, 0.25f,  34.0f, 0.30f},  // SOB
+        {2.10f, 1.05f, 0.75f,  620, 1250, 2400, 0.30f, 0.45f,  46.0f, 0.45f},  // LAUGH_BROKEN
+        {2.30f, 0.42f, 0.30f,  320,  780, 1900, 0.45f, 0.85f,  36.0f, 0.90f},  // MONSTER_ROAR
+        {2.90f, 0.70f, 1.25f,  520, 1450, 2700, 0.35f, 0.70f,  96.0f, 0.78f},  // MONSTER_WAIL
+        {1.40f, 1.60f, 1.50f,  700, 2100, 3200, 0.55f, 0.90f, 112.0f, 0.78f},  // MONSTER_CHITTER
     };
     const Spec& sp = kSpec[type];
 
@@ -473,6 +485,7 @@ std::vector<float> synthesizeVocal(VocalType type, const VoiceProfile& voice,
     float phase = 0.0f, jitter = 1.0f, shim = 1.0f;
     float sobPhase = 0.0f;
     float radiationPrev = 0.0f;
+    float amPhase = 0.0f;
 
     for (int i = 0; i < n; i++) {
         float t = (float)i / n;
@@ -520,6 +533,20 @@ std::vector<float> synthesizeVocal(VocalType type, const VoiceProfile& voice,
         float src = glottal + frand(rng) * sp.noise;
         if (sp.rough > 0.5f) src = std::tanh(src * (1.0f + sp.rough * 3.0f));
 
+        // Roughness: amplitude modulation inside the 30-150Hz band. The rate
+        // drifts a little across the cry, because a fixed rate reads as a
+        // tremolo effect rather than as a voice tearing.
+        if (sp.amDepth > 0.001f) {
+            float amHz = sp.amFreq * (0.86f + 0.28f * t);
+            amPhase += amHz / fs;
+            if (amPhase > 1.0f) amPhase -= 1.0f;
+            // Sharpened, so the modulation is closer to a train of bursts than
+            // a sine - that is what the measured signature looks like.
+            float m = 0.5f + 0.5f * std::sin(amPhase * TAU);
+            m = m * m * (3.0f - 2.0f * m);
+            src *= 1.0f - sp.amDepth * (1.0f - m);
+        }
+
         float v = r1.run(src * env);
         v = r2.run(v);
         v = r3.run(v);
@@ -533,6 +560,49 @@ std::vector<float> synthesizeVocal(VocalType type, const VoiceProfile& voice,
     float g = 0.92f / peak;
     for (float& s : out) s *= g;
     return out;
+}
+
+// ------------------------------------------------------------- analysis
+
+float measureRoughness(const std::vector<float>& pcm, int sampleRate) {
+    if (pcm.size() < (size_t)sampleRate / 4) return 0.0f;
+
+    // Envelope: full-wave rectify, then a one-pole at ~400Hz so modulation up
+    // to a few hundred Hz survives while the carrier does not.
+    std::vector<float> env(pcm.size());
+    float lp = 0.0f;
+    float k = 1.0f - std::exp(-TAU * 400.0f / sampleRate);
+    for (size_t i = 0; i < pcm.size(); i++) {
+        lp += (std::fabs(pcm[i]) - lp) * k;
+        env[i] = lp;
+    }
+    // Remove the DC and the slow syllabic contour.
+    float mean = 0.0f;
+    for (float v : env) mean += v;
+    mean /= (float)env.size();
+    for (float& v : env) v -= mean;
+
+    // Goertzel over the modulation spectrum: energy in 30-150Hz against the
+    // whole 4-300Hz range.
+    auto bandEnergy = [&](float lo, float hi) {
+        double total = 0.0;
+        for (float f = lo; f <= hi; f += 2.0f) {
+            double w = TAU * f / sampleRate;
+            double coeff = 2.0 * std::cos(w);
+            double s0 = 0, s1 = 0, s2 = 0;
+            for (size_t i = 0; i < env.size(); i++) {
+                s0 = env[i] + coeff * s1 - s2;
+                s2 = s1;
+                s1 = s0;
+            }
+            total += s1 * s1 + s2 * s2 - coeff * s1 * s2;
+        }
+        return total;
+    };
+    double rough = bandEnergy(30.0f, 150.0f);
+    double all = bandEnergy(4.0f, 300.0f);
+    if (all <= 1e-12) return 0.0f;
+    return (float)(rough / all);
 }
 
 } // namespace hm

@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 #include <cmath>
+#include <array>
+#include <initializer_list>
 
 using namespace hm;
 
@@ -342,6 +344,168 @@ static void bakeAmbience(PackWriter& pack) {
     }
 }
 
+// -------------------------------------------------------------- friction SFX
+
+// Creaks, groans and squeals, modelled as stick-slip relaxation oscillation
+// rather than as filtered noise.
+//
+// Two surfaces under load do not slide smoothly: they stick while elastic
+// strain builds, then release in a sudden slip, then stick again. Each slip is
+// an impulse that rings the resonant modes of whatever is being loaded. The
+// rate of those slips is set by how fast the joint is being driven and by the
+// roughness of the surfaces, which is why a door opened slowly grinds out
+// individual grains and the same door opened fast squeals. Filtered noise
+// cannot produce that behaviour; this does, and it is the reason a creak here
+// changes character over its own length.
+struct StickSlip {
+    // A bank of decaying resonant modes, struck by each slip event.
+    struct Mode { float f, q, amp; float y1 = 0, y2 = 0, a = 0, b = 0, c = 0; };
+    std::vector<Mode> modes;
+    float strain = 0.0f;
+    float threshold = 1.0f;
+    uint32_t rng = 12345u;
+
+    void setModes(std::initializer_list<std::array<float, 3>> defs, float fs) {
+        modes.clear();
+        for (const auto& d : defs) {
+            Mode m;
+            m.f = d[0];
+            m.q = d[1];
+            m.amp = d[2];
+            float bw = m.f / m.q;
+            m.c = -std::exp(-2.0f * PI * bw / fs);
+            m.b = 2.0f * std::exp(-PI * bw / fs) * std::cos(2.0f * PI * m.f / fs);
+            m.a = 1.0f - m.b - m.c;
+            modes.push_back(m);
+        }
+    }
+
+    float nz() {
+        rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+        return ((int32_t)(rng >> 8) * (1.0f / 8388608.0f)) - 1.0f;
+    }
+
+    // `drive` is how fast the joint is being moved; `grip` how rough it is.
+    float step(float drive, float grip, float fs) {
+        float impulse = 0.0f;
+        strain += drive / fs;
+        if (strain >= threshold) {
+            // Slip: the stored strain is released as an impulse, and the next
+            // stick threshold is re-drawn because the surface is not uniform.
+            impulse = strain * (0.7f + 0.3f * nz());
+            strain = 0.0f;
+            threshold = grip * (0.55f + 0.9f * ((nz() + 1.0f) * 0.5f));
+            if (threshold < 1e-4f) threshold = 1e-4f;
+        }
+        float out = 0.0f;
+        for (Mode& m : modes) {
+            float y = m.a * impulse + m.b * m.y1 + m.c * m.y2;
+            m.y2 = m.y1;
+            m.y1 = y;
+            out += y * m.amp;
+        }
+        return out;
+    }
+};
+
+struct CreakDef {
+    const char* name;
+    int takes;
+    float dur;
+    int kind;    // 0 wooden door, 1 floorboard, 2 metal hinge, 3 structural groan
+};
+
+static const CreakDef kCreaks[] = {
+    {"sfx_creak_door",  4, 2.30f, 0},
+    {"sfx_creak_floor", 4, 0.55f, 1},
+    {"sfx_creak_metal", 4, 1.70f, 2},
+    {"sfx_groan_struct",3, 3.40f, 3},
+};
+
+static void bakeCreaks(PackWriter& pack) {
+    std::printf("\nfriction sounds (stick-slip model)\n");
+    const int rate = 22050;
+    for (const CreakDef& def : kCreaks) {
+        for (int take = 0; take < def.takes; take++) {
+            int n = (int)(def.dur * rate);
+            std::vector<float> buf(n, 0.0f);
+            StickSlip ss;
+            ss.rng = 0x51D5u + def.kind * 7717u + take * 131u;
+
+            switch (def.kind) {
+            case 0:  // dry wooden door: low body, a couple of hinge modes
+                ss.setModes({{{182.0f, 26.0f, 1.00f}}, {{487.0f, 34.0f, 0.62f}},
+                             {{1130.0f, 42.0f, 0.30f}}, {{2470.0f, 30.0f, 0.12f}}}, (float)rate);
+                break;
+            case 1:  // floorboard under a foot: short, boxy, low
+                ss.setModes({{{146.0f, 18.0f, 1.00f}}, {{351.0f, 22.0f, 0.55f}},
+                             {{903.0f, 26.0f, 0.22f}}}, (float)rate);
+                break;
+            case 2:  // metal hinge: high, ringing, much higher Q
+                ss.setModes({{{742.0f, 90.0f, 0.80f}}, {{1783.0f, 120.0f, 1.00f}},
+                             {{3260.0f, 110.0f, 0.55f}}, {{5120.0f, 80.0f, 0.22f}}}, (float)rate);
+                break;
+            default: // a building settling: very low, very slow
+                ss.setModes({{{47.0f, 14.0f, 1.00f}}, {{96.0f, 18.0f, 0.70f}},
+                             {{212.0f, 20.0f, 0.35f}}}, (float)rate);
+                break;
+            }
+
+            for (int i = 0; i < n; i++) {
+                float t = (float)i / n;
+                // Drive velocity over the event: a door is pushed, sticks,
+                // then swings; a footstep is one short press.
+                float drive, grip, env;
+                switch (def.kind) {
+                case 0:
+                    drive = 26.0f + 52.0f * std::sin(t * PI) + 14.0f * std::sin(t * 17.0f);
+                    grip = 0.7f + 0.5f * std::sin(t * 5.0f + take);
+                    env = smoothstepf(0.0f, 0.06f, t) * (1.0f - smoothstepf(0.75f, 1.0f, t));
+                    break;
+                case 1:
+                    drive = 30.0f + 70.0f * std::sin(t * PI);
+                    grip = 0.9f;
+                    env = std::sin(t * PI);
+                    break;
+                case 2:
+                    drive = 90.0f + 190.0f * t + 40.0f * std::sin(t * 23.0f);
+                    grip = 0.35f + 0.25f * std::sin(t * 9.0f + take * 2.0f);
+                    env = smoothstepf(0.0f, 0.05f, t) * (1.0f - smoothstepf(0.72f, 1.0f, t));
+                    break;
+                default:
+                    drive = 8.0f + 12.0f * std::sin(t * PI * 0.8f);
+                    grip = 1.6f + 0.8f * std::sin(t * 3.0f);
+                    env = smoothstepf(0.0f, 0.15f, t) * (1.0f - smoothstepf(0.6f, 1.0f, t));
+                    break;
+                }
+                buf[i] = ss.step(drive, grip, (float)rate) * env;
+            }
+
+            // Gentle high-pass to remove the DC the impulse train leaves.
+            float prev = 0.0f, hp = 0.0f;
+            for (int i = 0; i < n; i++) {
+                float x = buf[i];
+                hp = 0.995f * (hp + x - prev);
+                prev = x;
+                buf[i] = hp;
+            }
+            float peak = 1e-6f;
+            for (float v : buf) peak = std::max(peak, std::fabs(v));
+            float g = 0.85f / peak;
+
+            std::vector<int16_t> out(n);
+            for (int i = 0; i < n; i++)
+                out[i] = (int16_t)(clampf(buf[i] * g, -1.0f, 1.0f) * 32000.0f);
+
+            char name[PAK_NAME_LEN];
+            std::snprintf(name, sizeof(name), "%s_%d", def.name, take);
+            pack.add(name, PAK_AUDIO_MONO, rate, (uint32_t)n,
+                     out.data(), out.size() * sizeof(int16_t));
+        }
+        std::printf("  %-18s %d takes, %.2fs\n", def.name, def.takes, def.dur);
+    }
+}
+
 // ---------------------------------------------------------------------- main
 
 int main(int argc, char** argv) {
@@ -350,6 +514,7 @@ int main(int argc, char** argv) {
     PackWriter pack;
     bakeTextures(pack);
     bakeVoice(pack);
+    bakeCreaks(pack);
     bakeAmbience(pack);
     return pack.write(out) ? 0 : 1;
 }

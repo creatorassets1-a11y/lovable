@@ -89,4 +89,9 @@ enum VocalType {
 std::vector<float> synthesizeVocal(VocalType type, const VoiceProfile& voice,
                                    int sampleRate, uint32_t seed);
 
+// Measures how much of a signal's energy sits in the 30-150Hz amplitude
+// modulation band - the "roughness" that distinguishes a scream from a shout.
+// Returned as a fraction of total modulation energy, 0..1. Used by the tests.
+float measureRoughness(const std::vector<float>& pcm, int sampleRate);
+
 } // namespace hm

@@ -288,6 +288,8 @@ static void testMaterialTable(const char* pakPath) {
         "vo_dispatch_open", "vo_objective_done", "vo_sv_follow", "vo_sv_thanks",
         "vo_warn_close", "vo_warn_dark", "vo_good", "vo_lost_signal",
         "vx_chitter_0", "vx_wail_0", "vx_sob_0", "vo_sv_help", "vo_sv_run",
+        "sfx_creak_door_0", "sfx_creak_door_3", "sfx_creak_floor_0",
+        "sfx_creak_metal_0", "sfx_groan_struct_0",
     };
     int missingAudio = 0;
     for (const char* nm : needed) {

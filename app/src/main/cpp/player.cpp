@@ -49,6 +49,7 @@ vec3 Player::torchDir(float time) const {
 
 void Player::update(float dt, const World& w, AudioEngine& audio,
                     float creatureDist, bool creatureVisible) {
+    bool indoors = w.indoorAt(pos);
     if (!alive) {
         // On death the camera sinks and rolls; the rest of the sim stops.
         eyeHeight = lerpf(eyeHeight, 0.35f, clampf(dt * 2.5f, 0.0f, 1.0f));
@@ -112,6 +113,13 @@ void Player::update(float dt, const World& w, AudioEngine& audio,
     if (moving > 0.5f && std::floor(prevBob / PI) != std::floor(bobPhase / PI)) {
         float g = crouching ? 0.20f : (canSprint ? 0.70f : 0.45f);
         audio.post(SND_FOOTSTEP, pos, g, 0.92f + (bobPhase - prevBob) * 0.2f);
+        stepCount++;
+        // Indoors, some steps land on a board that gives. It is the single
+        // most effective way to make the player regret moving quickly, because
+        // the noise is theirs and they can hear it carry.
+        if (indoors && (stepCount % 3) == 0)
+            audio.post(SND_CREAK_FLOOR, pos, crouching ? 0.30f : 0.75f,
+                       0.9f + 0.2f * (float)(stepCount % 5) * 0.1f);
     }
 
     // --- crouch height ---

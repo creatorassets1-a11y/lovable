@@ -41,6 +41,7 @@ static const float kDur[SND_COUNT] = {
     1.20f,  // FLARE_FIRE
     0.35f,  // RADIO_BEEP
     1.00f, 1.00f, 1.00f, 1.00f,   // NPC_*: always resolved to baked samples
+    2.40f, 0.60f, 1.80f, 3.50f,   // creaks and groans: baked
 };
 
 // How much of each sound feeds the reverb. Dry impacts stay close; screams and
@@ -50,6 +51,7 @@ static const float kSend[SND_COUNT] = {
     0.45f, 0.35f, 0.05f, 0.65f, 0.72f, 0.55f, 0.40f, 0.60f,
     0.65f, 0.05f, 0.15f, 0.50f, 0.10f,
     0.40f, 0.40f, 0.40f, 0.40f,
+    0.55f, 0.30f, 0.68f, 0.60f,
 };
 
 // Ids that are played from baked audio rather than synthesised. Resolved once
@@ -66,6 +68,10 @@ static const IdSampleSet kIdSamples[SND_COUNT] = {
     {"vx_sob",3},              // NPC_SOB
     {"vo_sv_run",1},           // NPC_RUN
     {"vo_sv_follow",1},        // NPC_FOLLOW
+    {"sfx_creak_door",4},      // CREAK_DOOR
+    {"sfx_creak_floor",4},     // CREAK_FLOOR
+    {"sfx_creak_metal",4},     // CREAK_METAL
+    {"sfx_groan_struct",3},    // GROAN_STRUCT
 };
 
 // ------------------------------------------------------------- event plumbing

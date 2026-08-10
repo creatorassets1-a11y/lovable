@@ -1,13 +1,21 @@
 #include "gfx.h"
 #include "font.h"
 #include "matids.h"
-#include <android/log.h>
 #include <cstring>
 #include <cstdlib>
+#include <cstdio>
 #include <vector>
 
+// The renderer is also built for the headless render test, which links against
+// desktop Mesa rather than Android. Only the logging differs.
+#if defined(__ANDROID__)
+#include <android/log.h>
 #define GLOG(...) __android_log_print(ANDROID_LOG_INFO, "HollowGfx", __VA_ARGS__)
 #define GERR(...) __android_log_print(ANDROID_LOG_ERROR, "HollowGfx", __VA_ARGS__)
+#else
+#define GLOG(...) do { std::printf("  [gfx] " __VA_ARGS__); std::printf("\n"); } while (0)
+#define GERR(...) do { std::printf("  [gfx-ERR] " __VA_ARGS__); std::printf("\n"); } while (0)
+#endif
 
 namespace hm {
 
@@ -23,11 +31,11 @@ layout(location = 5) in float aAO;
 uniform mat4 uMVP;
 uniform mat4 uModel;
 uniform mat4 uLightVP;
-out vec3 vWorld;
+out highp vec3 vWorld;
 out vec3 vNormal;
 out vec3 vTangent;
 out vec2 vUV;
-out vec4 vLightPos;
+out highp vec4 vLightPos;
 flat out float vMat;
 out float vAO;
 void main() {
@@ -45,13 +53,17 @@ void main() {
 )";
 
 static const char* kSceneFS = R"(#version 300 es
-precision mediump float;
+// highp, not mediump. The district is 320m across, and mediump (fp16 on
+// mobile) has about 0.25m of precision at that magnitude - enough to make
+// lighting and fog visibly quantise into blocks as you walk. Texture sampling
+// stays mediump, which is where the bandwidth actually goes.
+precision highp float;
 precision mediump sampler2DArray;
-in vec3 vWorld;
+in highp vec3 vWorld;
 in vec3 vNormal;
 in vec3 vTangent;
 in vec2 vUV;
-in vec4 vLightPos;
+in highp vec4 vLightPos;
 flat in float vMat;
 in float vAO;
 
@@ -70,6 +82,8 @@ uniform vec3 uLightPos[8];
 uniform vec3 uLightColor[8];
 uniform float uLightRadius[8];
 uniform vec3 uAmbient;
+uniform vec3 uMoonDir;
+uniform vec3 uMoonColor;
 uniform vec3 uFogColor;
 uniform float uFogDensity;
 out vec4 fragColor;
@@ -112,6 +126,13 @@ void main() {
     // Baked corner occlusion, applied to ambient and indirect only.
     float ao = clamp(vAO, 0.0, 1.0);
     vec3 col = uAmbient * albedo * ao;
+
+    // Moonlight: a single unshadowed directional term, plus a sky fill that
+    // favours upward-facing surfaces. Cheap, and it is what separates "dark"
+    // from "nothing on the screen".
+    float moon = max(dot(N, -normalize(uMoonDir)), 0.0);
+    float sky = 0.5 + 0.5 * N.y;
+    col += albedo * uMoonColor * ((moon * 0.65 + sky * 0.45) * ao);
 
     // Specular sharpness from the baked roughness: wet asphalt and glazed tile
     // catch the torch, plaster and cloth do not.
@@ -181,16 +202,27 @@ precision mediump float;
 in vec2 vUV;
 uniform sampler2D uTex;
 uniform float uFear;
-uniform float uTime;
+uniform highp float uTime;
 uniform float uFade;
 uniform float uDamage;
 uniform float uAspect;
+uniform float uExposure;
 out vec4 fragColor;
 
-float hash(vec2 p) {
-    p = fract(p * vec2(443.897, 441.423));
-    p += dot(p, p + 19.19);
-    return fract(p.x * p.y);
+// Deliberately small-magnitude, and highp.
+//
+// The previous version multiplied the UVs up to about 450,000 before taking
+// fract(). This shader is mediump, and mediump on mobile hardware is fp16,
+// whose maximum finite value is 65504 - so that overflowed to infinity, and
+// fract(infinity) is NaN. The NaN went straight into the grain term, through
+// every subsequent multiply, and out to the framebuffer, turning the entire
+// frame black on any GPU that honours mediump. Desktop drivers that quietly
+// promote mediump to fp32 rendered it correctly, which is exactly what makes
+// this class of bug so easy to ship.
+highp float hash(highp vec2 p) {
+    p = fract(p * 0.1031);
+    p += dot(p, p.yx + 33.33);
+    return fract((p.x + p.y) * p.x);
 }
 
 void main() {
@@ -201,7 +233,7 @@ void main() {
     float tearAmt = smoothstep(0.55, 1.0, uFear);
     if (tearAmt > 0.0) {
         float band = floor(uv.y * 90.0);
-        float n = hash(vec2(band, floor(uTime * 11.0)));
+        highp float n = hash(vec2(band, floor(fract(uTime * 0.01) * 1100.0)));
         if (n > 0.965) uv.x += (n - 0.982) * 0.10 * tearAmt;
     }
 
@@ -224,16 +256,28 @@ void main() {
     col = mix(col, vec3(lum * 1.6, lum * 0.12, lum * 0.10), uDamage * 0.8);
 
     // Grain: heavier in the dark, which is where real sensors are noisy too.
-    float g = hash(uv * vec2(1024.0, 1024.0) + fract(uTime) * 77.7);
+    highp float g = hash(uv * 512.0 + fract(uTime) * 71.7);
     col += (g - 0.5) * (0.030 + 0.075 * uFear) * (1.2 - lum);
 
     // Vignette closes in as fear rises.
+    // Written as 1.0 - smoothstep(inner, outer, d) rather than
+    // smoothstep(outer, inner, d): GLSL leaves smoothstep undefined when
+    // edge0 >= edge1, and on at least one driver the reversed form yields NaN,
+    // which propagates through the multiply and blacks out the whole frame.
     float d = length(vec2(c.x * uAspect, c.y));
-    float vig = smoothstep(1.05, 0.28 - uFear * 0.10, d);
+    float inner = 0.28 - uFear * 0.10;
+    float vig = 1.0 - smoothstep(inner, 1.05, d);
     col *= mix(1.0, vig, 0.55 + 0.40 * uFear);
 
     // Slow scanline roll, very low amplitude.
     col *= 1.0 - 0.030 * sin(uv.y * 900.0 + uTime * 3.0) * (0.3 + uFear);
+
+    // Exposure, then a soft filmic knee. Straight linear output crushes
+    // everything the torch is not pointing at into pure black on a phone
+    // screen in a lit room; the knee lifts the shadows without washing the
+    // highlights out.
+    col *= uExposure;
+    col = col / (col + vec3(0.85)) * 1.32;
 
     col *= (1.0 - uFade);
     fragColor = vec4(col, 1.0);
@@ -350,26 +394,41 @@ void GpuMesh::destroy() {
 // tangent-space normal with roughness in alpha. One array means one bind and
 // one draw call for the entire city.
 bool Renderer::buildMaterialArrays(const AssetPack* pack) {
-    if (!pack || !pack->valid()) {
-        GERR("no asset pack: materials unavailable");
-        return false;
-    }
-
-    // Determine dimensions from the first albedo entry.
     int size = 0;
-    for (int i = 0; i < MAT_COUNT; i++) {
-        char name[64];
-        std::snprintf(name, sizeof(name), "%s_a", kMatNames[i]);
-        const PakEntry* e = pack->find(name);
-        if (e) { size = (int)e->w; break; }
+    if (pack && pack->valid()) {
+        for (int i = 0; i < MAT_COUNT; i++) {
+            char name[64];
+            std::snprintf(name, sizeof(name), "%s_a", kMatNames[i]);
+            const PakEntry* e = pack->find(name);
+            if (e) { size = (int)e->w; break; }
+        }
     }
-    if (size <= 0) { GERR("pack has no material textures"); return false; }
+    if (size <= 0) {
+        GERR("no usable asset pack - falling back to placeholder materials");
+        buildFallbackMaterials();
+        return true;
+    }
     mMaterialLayers = MAT_COUNT;
+
+    // A texture with a mipmapping min filter is only complete if the whole
+    // chain exists. glTexStorage3D allocates exactly the number of levels it
+    // is told to, so asking for 1 and then filtering LINEAR_MIPMAP_LINEAR
+    // leaves the texture incomplete - and an incomplete texture samples as
+    // opaque black, which renders the entire world invisible while the UI
+    // carries on drawing normally.
+    int levels = 1;
+    while ((size >> levels) > 0) levels++;
 
     auto makeArray = [&](GLuint& tex, const char* suffix) {
         glGenTextures(1, &tex);
         glBindTexture(GL_TEXTURE_2D_ARRAY, tex);
-        glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGBA8, size, size, MAT_COUNT);
+        glTexStorage3D(GL_TEXTURE_2D_ARRAY, levels, GL_RGBA8, size, size, MAT_COUNT);
+        GLenum err = glGetError();
+        if (err != GL_NO_ERROR) {
+            GERR("glTexStorage3D(%d levels, %dx%d, %d layers) failed: 0x%x",
+                 levels, size, size, MAT_COUNT, err);
+            return 0;
+        }
         int uploaded = 0;
         for (int i = 0; i < MAT_COUNT; i++) {
             char name[64];
@@ -398,8 +457,72 @@ bool Renderer::buildMaterialArrays(const AssetPack* pack) {
     if (mNormalArray) glDeleteTextures(1, &mNormalArray);
     int a = makeArray(mAlbedoArray, "_a");
     int n = makeArray(mNormalArray, "_n");
-    GLOG("materials: %d albedo + %d normal layers at %dx%d", a, n, size, size);
-    return a > 0;
+    GLOG("materials: %d albedo + %d normal layers at %dx%d, %d mip levels",
+         a, n, size, size, levels);
+    if (a <= 0) {
+        // Rather than render a black world, fall back to something visible.
+        GERR("material upload failed - falling back to placeholder materials");
+        buildFallbackMaterials();
+    }
+    return true;
+}
+
+// Last-resort materials, generated in a few milliseconds with no pack at all.
+// A grey checker world is ugly; an invisible one is unshippable, and the only
+// way to tell them apart on a user's phone is to never allow the second.
+void Renderer::buildFallbackMaterials() {
+    const int S = 64;
+    int levels = 1;
+    while ((S >> levels) > 0) levels++;
+    mMaterialLayers = MAT_COUNT;
+
+    std::vector<uint8_t> alb((size_t)S * S * 4);
+    std::vector<uint8_t> nrm((size_t)S * S * 4);
+
+    if (mAlbedoArray) glDeleteTextures(1, &mAlbedoArray);
+    if (mNormalArray) glDeleteTextures(1, &mNormalArray);
+    glGenTextures(1, &mAlbedoArray);
+    glGenTextures(1, &mNormalArray);
+
+    glBindTexture(GL_TEXTURE_2D_ARRAY, mAlbedoArray);
+    glTexStorage3D(GL_TEXTURE_2D_ARRAY, levels, GL_RGBA8, S, S, MAT_COUNT);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, mNormalArray);
+    glTexStorage3D(GL_TEXTURE_2D_ARRAY, levels, GL_RGBA8, S, S, MAT_COUNT);
+
+    for (int layer = 0; layer < MAT_COUNT; layer++) {
+        // Give each material a distinguishable tone so the world is at least
+        // readable, and a checker so surfaces have some texture to them.
+        float h = (layer * 0.137f);
+        float base = 0.30f + 0.20f * std::fabs(std::sin(h * 6.283f));
+        for (int y = 0; y < S; y++) {
+            for (int x = 0; x < S; x++) {
+                bool chk = ((x >> 3) ^ (y >> 3)) & 1;
+                float v = base * (chk ? 1.0f : 0.78f);
+                size_t i = ((size_t)y * S + x) * 4;
+                alb[i + 0] = (uint8_t)(v * 255.0f * (0.85f + 0.3f * std::sin(h * 3.1f)));
+                alb[i + 1] = (uint8_t)(v * 255.0f * 0.95f);
+                alb[i + 2] = (uint8_t)(v * 255.0f * (0.85f + 0.3f * std::cos(h * 2.3f)));
+                alb[i + 3] = 255;
+                nrm[i + 0] = 128; nrm[i + 1] = 128; nrm[i + 2] = 255;
+                nrm[i + 3] = 200;   // roughness
+            }
+        }
+        glBindTexture(GL_TEXTURE_2D_ARRAY, mAlbedoArray);
+        glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, layer, S, S, 1,
+                        GL_RGBA, GL_UNSIGNED_BYTE, alb.data());
+        glBindTexture(GL_TEXTURE_2D_ARRAY, mNormalArray);
+        glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, layer, S, S, 1,
+                        GL_RGBA, GL_UNSIGNED_BYTE, nrm.data());
+    }
+    for (GLuint t : {mAlbedoArray, mNormalArray}) {
+        glBindTexture(GL_TEXTURE_2D_ARRAY, t);
+        glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    }
+    GLOG("fallback materials: %d layers at %dx%d", MAT_COUNT, S, S);
 }
 
 // The atlas is 16x5 cells of 8x8. Glyphs occupy cells 0..63; cell 79 is a
@@ -489,6 +612,8 @@ bool Renderer::init(const AssetPack* pack) {
     uAmbient = glGetUniformLocation(mSceneProg, "uAmbient");
     uFogColor = glGetUniformLocation(mSceneProg, "uFogColor");
     uFogDensity = glGetUniformLocation(mSceneProg, "uFogDensity");
+    uMoonDir = glGetUniformLocation(mSceneProg, "uMoonDir");
+    uMoonColor = glGetUniformLocation(mSceneProg, "uMoonColor");
 
     dMVP = glGetUniformLocation(mDepthProg, "uMVP");
 
@@ -498,6 +623,7 @@ bool Renderer::init(const AssetPack* pack) {
     pFade = glGetUniformLocation(mPostProg, "uFade");
     pDamage = glGetUniformLocation(mPostProg, "uDamage");
     pAspect = glGetUniformLocation(mPostProg, "uAspect");
+    pExposure = glGetUniformLocation(mPostProg, "uExposure");
 
     uScreen = glGetUniformLocation(mUiProg, "uScreen");
     uUiTex = glGetUniformLocation(mUiProg, "uUiTex");
@@ -674,6 +800,8 @@ void Renderer::beginScene(const SceneParams& sp) {
     glUniform3f(uAmbient, sp.ambient.x, sp.ambient.y, sp.ambient.z);
     glUniform3f(uFogColor, sp.fogColor.x, sp.fogColor.y, sp.fogColor.z);
     glUniform1f(uFogDensity, sp.fogDensity);
+    glUniform3f(uMoonDir, sp.moonDir.x, sp.moonDir.y, sp.moonDir.z);
+    glUniform3f(uMoonColor, sp.moonColor.x, sp.moonColor.y, sp.moonColor.z);
 
     int n = std::min(sp.numLights, MAX_POINT_LIGHTS);
     glUniform1i(uNumLights, n);
@@ -754,20 +882,26 @@ void Renderer::endScene() {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-void Renderer::postProcess(float fear, float time, float fade, float damage) {
+void Renderer::postProcess(float fear, float time, float fade, float damage,
+                           float exposure) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, mW, mH);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
     glUseProgram(mPostProg);
-    glActiveTexture(GL_TEXTURE0);
+    // Unit 3, not unit 0. The scene pass leaves a GL_TEXTURE_2D_ARRAY bound to
+    // unit 0, and binding a GL_TEXTURE_2D to the same unit leaves two targets
+    // live on it at once - which some drivers sample as black. Every pass owns
+    // its own unit now.
+    glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_2D, mSceneColor);
-    glUniform1i(pTex, 0);
+    glUniform1i(pTex, 3);
     glUniform1f(pFear, fear);
     glUniform1f(pTime, time);
     glUniform1f(pFade, fade);
     glUniform1f(pDamage, damage);
     glUniform1f(pAspect, (float)mW / (float)std::max(1, mH));
+    glUniform1f(pExposure, exposure);
     glBindVertexArray(mEmptyVao);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     glBindVertexArray(0);
@@ -887,9 +1021,9 @@ void Renderer::uiFlush() {
     if (mUiCount == 0) return;
     glUseProgram(mUiProg);
     glUniform2f(uScreen, (float)mW, (float)mH);
-    glActiveTexture(GL_TEXTURE0);
+    glActiveTexture(GL_TEXTURE4);
     glBindTexture(GL_TEXTURE_2D, mFontTex);
-    glUniform1i(uUiTex, 0);
+    glUniform1i(uUiTex, 4);
     glBindVertexArray(mUiVao);
     glBindBuffer(GL_ARRAY_BUFFER, mUiVbo);
     glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(UiVert) * mUiCount, mUiVerts);

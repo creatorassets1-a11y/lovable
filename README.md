@@ -8,8 +8,8 @@ Written in **C++** (engine), **C** (asset-pack validator, NDK glue),
 **Kotlin** (app shell, lifecycle, audio focus, save mirror) and **Java**
 (haptics, device tiering).
 
-**Prebuilt APK: [`dist/HollowSignal-2.0.apk`](dist/HollowSignal-2.0.apk)** —
-63 MB, signed, arm64-v8a + armeabi-v7a, Android 5.0 (API 21) and up.
+**Prebuilt APK: [`dist/HollowSignal-2.1.apk`](dist/HollowSignal-2.1.apk)** —
+64 MB, signed, arm64-v8a + armeabi-v7a, Android 5.0 (API 21) and up.
 
 ---
 
@@ -82,6 +82,12 @@ is an empty city. A timer ensures one eventually comes looking, and that timer
 runs far faster the louder you have been. The guarantee doubles as the stealth
 reward.
 
+**Brightness is yours to set.** The title screen has a calibration strip and a
+brightness control, because "as dark as it should be" depends entirely on the
+screen and the room. The night is lit by a weak moonlight term so the city has
+readable silhouettes outside the torch cone; interiors are much darker, which
+is what makes stepping through a door land.
+
 **Your torch is the light and the liability.** It is the only shadow-casting
 light in the scene, so a monster's silhouette lands on the wall behind it,
 usually before you have consciously worked out what you are looking at. It
@@ -95,6 +101,24 @@ happens.
 **Survivors can die.** Escort targets are killed by monsters like anything
 else, which makes walking one across four blocks a real risk rather than a
 followed waypoint.
+
+**Screams that are built to the measured signature.** Human screams occupy a
+band nothing else does: amplitude modulation between 30 and 150Hz, which
+[Arnal et al. (Current Biology, 2015)](https://www.cell.com/fulltext/S0960-9822(15)00737-X)
+showed reaches the amygdala over a shorter path than the auditory cortex, and
+which listeners rate as more frightening the rougher it gets. Ordinary speech
+modulates at 4-5Hz and never enters it. Every cry in the game applies that
+modulation explicitly, and the tests measure it rather than assume it: the
+scream reads 0.71, the monster wail 0.81, and a spoken radio line 0.08.
+
+**Creaks that are a physical model, not filtered noise.** Two loaded surfaces
+do not slide smoothly — they stick while elastic strain builds, release in a
+sudden slip, and stick again. `tools/bake.cpp` simulates that relaxation
+oscillation directly and rings a bank of resonant modes with each slip, so a
+door pushed slowly grinds out individual grains and the same door pushed fast
+squeals, from one model. Doors creak when you cross a threshold, floorboards
+give under you indoors every few paces, hinges and structural groans fill the
+ambient mix.
 
 **Escalating wrongness.** Fear drives heartbeat rate, breathing, vignette,
 chromatic aberration, desaturation, a breathing lens warp and — above 55% —
@@ -229,9 +253,15 @@ signing key cannot be changed after release.
 ## Tests
 
 ```sh
-./tests/run_tests.sh          # 55 voice checks + 177 engine checks
+./tests/run_tests.sh          # 61 voice + 11 render + 177 engine checks
 python3 tests/check_shaders.py
 ```
+
+`tests/render_test.cpp` renders actual frames through desktop Mesa on an EGL
+pbuffer and inspects the pixels. It cannot say anything about performance on a
+phone, but it answers the question the other tests structurally cannot: is
+there a picture? It exists because version 2.0 shipped a completely black
+screen that every simulation test passed straight through.
 
 The suite builds the city, navigation, AI, physics, missions, audio DSP and
 asset loading for the host machine and exercises them headlessly. It checks
@@ -247,7 +277,19 @@ the mixer never emits a non-finite sample, that the pack reader rejects
 corrupt input, and that four minutes of simulated play per monster type
 produces the behaviour the design calls for.
 
-These caught eight genuine bugs during development. The most instructive:
+These caught eleven genuine bugs. The most instructive:
+
+- **Three separate causes of the black screen in 2.0**, none of which any
+  simulation test could see. The material texture arrays were allocated with
+  one mip level but filtered `LINEAR_MIPMAP_LINEAR`, leaving them
+  mipmap-incomplete — and GLES samples an incomplete texture as opaque black.
+  The vignette used `smoothstep(1.05, 0.26, d)`, which GLSL explicitly leaves
+  undefined when `edge0 >= edge1`. And the film-grain hash multiplied UVs up to
+  ~450,000 inside a `mediump` shader, where mobile fp16 tops out at 65504 — it
+  overflowed to infinity, `fract(infinity)` returned NaN, and the NaN
+  propagated into every pixel. Desktop drivers that quietly promote `mediump`
+  to fp32 render that last one correctly, which is exactly what makes it easy
+  to ship.
 
 - The speech synthesiser was missing the **lip radiation** term, so low
   frequencies swamped the formants and every vowel measured identically.

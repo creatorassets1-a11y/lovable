@@ -78,9 +78,12 @@ void Game::loadProgress() {
     FILE* f = std::fopen(mSavePath.c_str(), "rb");
     if (!f) return;
     int v = 0, u = 1;
-    if (std::fread(&v, sizeof(int), 1, f) == 1 && v == 2) {
+    if (std::fread(&v, sizeof(int), 1, f) == 1 && v == 3) {
         if (std::fread(&u, sizeof(int), 1, f) == 1)
             mUnlocked = (int)clampf((float)u, 1.0f, (float)MISSION_COUNT);
+        float b = 1.0f;
+        if (std::fread(&b, sizeof(float), 1, f) == 1)
+            mBrightness = clampf(b, 0.55f, 2.6f);
     }
     std::fclose(f);
 }
@@ -88,9 +91,10 @@ void Game::loadProgress() {
 void Game::saveProgress() {
     FILE* f = std::fopen(mSavePath.c_str(), "wb");
     if (!f) return;
-    int v = 2;
+    int v = 3;
     std::fwrite(&v, sizeof(int), 1, f);
     std::fwrite(&mUnlocked, sizeof(int), 1, f);
+    std::fwrite(&mBrightness, sizeof(float), 1, f);
     std::fclose(f);
 }
 
@@ -412,7 +416,23 @@ void Game::onTouchUp(int id, float x, float y) {
     if (slot == mLookTouch) mLookTouch = -1;
 
     if (mState == GS_TITLE && !t->moved) {
-        startNewGame();
+        float s2 = mUiScale;
+        float w = (float)mR.width(), h = (float)mR.height();
+        float by = h * 0.60f + 8.0f * s2;
+        float r = 34.0f * s2;
+        float dxm = x - (w * 0.5f - 150.0f * s2), dym = y - by;
+        float dxp = x - (w * 0.5f + 150.0f * s2);
+        if (dxm * dxm + dym * dym < r * r) {
+            mBrightness = clampf(mBrightness - 0.10f, 0.55f, 2.6f);
+            saveProgress();
+            audio.postUI(SND_RADIO_BEEP, 0.35f, 0.9f);
+        } else if (dxp * dxp + dym * dym < r * r) {
+            mBrightness = clampf(mBrightness + 0.10f, 0.55f, 2.6f);
+            saveProgress();
+            audio.postUI(SND_RADIO_BEEP, 0.35f, 1.1f);
+        } else {
+            startNewGame();
+        }
     } else if (mState == GS_DEAD && mStateTime > 2.6f) {
         // Death restarts the current job, not the game: losing an hour of
         // open-world progress is not a horror beat, it is just a punishment.
@@ -555,6 +575,21 @@ void Game::updatePlay(float dt) {
     bool indoors = mWorld.indoorAt(mPlayer.pos);
     audio.setIndoor(indoors ? 1.0f : 0.0f);
     audio.setBed(indoors ? mBedInterior : mBedStreet);
+
+    // Crossing a threshold swings the door. You announce yourself every time
+    // you enter a building, which is the cost of going inside.
+    {
+        int cx, cz;
+        mWorld.worldToCell(mPlayer.pos, cx, cz);
+        bool onDoor = mWorld.at(cx, cz) == CELL_DOORWAY;
+        if (onDoor && !mOnDoorway) {
+            audio.post(SND_CREAK_DOOR, mPlayer.pos, 0.9f, gRng.range(0.92f, 1.1f));
+            for (int j = 0; j < MAX_MONSTERS; j++)
+                if (mMonsters[j].active && gRng.f01() < 0.35f)
+                    mMonsters[j].alertTo(mPlayer.pos);
+        }
+        mOnDoorway = onDoor;
+    }
 
     // --- flare ---
     if (mBtnDown[BTN_FLARE] && mFlares > 0 && mFlareCooldown <= 0.0f) {
@@ -784,10 +819,17 @@ void Game::updateDirector(float dt) {
             vec3 c = mWorld.cellCenter(x, z);
             float d = length(c - mPlayer.pos);
             if (d < 8.0f || d > 34.0f) continue;
+            // Weighted toward the friction sounds indoors, where a building
+            // settling around you is most of the atmosphere.
+            bool inside = mWorld.indoorAt(mPlayer.pos);
             float r = gRng.f01();
-            if (r < 0.4f) audio.post(SND_DRIP, c, 0.5f, gRng.range(0.85f, 1.2f));
-            else if (r < 0.75f) audio.post(SND_METAL, c, 0.40f, gRng.range(0.7f, 1.3f));
-            else audio.post(SND_DOOR, c, 0.35f, gRng.range(0.8f, 1.1f));
+            if (r < 0.22f) audio.post(SND_DRIP, c, 0.5f, gRng.range(0.85f, 1.2f));
+            else if (r < 0.40f) audio.post(SND_METAL, c, 0.40f, gRng.range(0.7f, 1.3f));
+            else if (r < 0.62f) audio.post(SND_CREAK_METAL, c, 0.55f, gRng.range(0.85f, 1.15f));
+            else if (r < (inside ? 0.86f : 0.74f))
+                audio.post(SND_CREAK_DOOR, c, 0.45f, gRng.range(0.8f, 1.15f));
+            else audio.post(SND_GROAN_STRUCT, c, inside ? 0.7f : 0.45f,
+                            gRng.range(0.9f, 1.1f));
             break;
         }
     }
@@ -1004,8 +1046,13 @@ void Game::render() {
         sp.torchIntensity = mPlayer.torchOn ? 2.15f * clampf(flick, 0.0f, 1.0f) : 0.0f;
         sp.torchRange = 22.0f;
         sp.torchColor = vec3(1.0f, 0.93f, 0.80f);
-        // A little moonlight outdoors; effectively none indoors.
-        sp.ambient = indoors ? vec3(0.012f, 0.013f, 0.017f) : vec3(0.030f, 0.034f, 0.048f);
+        // Night, but a night you can actually see in. Indoors is much darker
+        // than the street, which is what makes stepping through a door land.
+        sp.ambient = indoors ? vec3(0.030f, 0.031f, 0.038f)
+                             : vec3(0.070f, 0.076f, 0.098f);
+        sp.moonColor = indoors ? vec3(0.020f, 0.023f, 0.034f)
+                               : vec3(0.105f, 0.118f, 0.165f);
+        sp.moonDir = normalize(vec3(0.38f, -0.80f, 0.46f));
         gatherLights(sp);
 
         mR.beginShadowPass(sp);
@@ -1015,7 +1062,7 @@ void Game::render() {
         mR.beginScene(sp);
         renderWorld(sp, false);
         mR.endScene();
-        mR.postProcess(mPlayer.fear, mTime, mFade, mDamage);
+        mR.postProcess(mPlayer.fear, mTime, mFade, mDamage, mBrightness);
     } else {
         sp.camPos = vec3(0, 1.6f, 0);
         sp.view = mat4::lookAt(sp.camPos, sp.camPos + vec3(0, 0, 1), vec3(0, 1, 0));
@@ -1028,7 +1075,7 @@ void Game::render() {
         mR.endShadowPass();
         mR.beginScene(sp);
         mR.endScene();
-        mR.postProcess(0.18f, mTime, mFade, 0.0f);
+        mR.postProcess(0.18f, mTime, mFade, 0.0f, mBrightness);
     }
 
     mR.uiBegin();
@@ -1051,7 +1098,26 @@ void Game::renderTitle() {
 
     char line[96];
     std::snprintf(line, sizeof(line), "PROGRESS  %d / %d", mUnlocked, MISSION_COUNT);
-    mR.uiTextCentered(line, w * 0.5f, h * 0.55f, 20.0f * s, 0.70f, 0.70f, 0.68f, 0.9f);
+    mR.uiTextCentered(line, w * 0.5f, h * 0.47f, 20.0f * s, 0.70f, 0.70f, 0.68f, 0.9f);
+
+    // Brightness. Every horror game ships one of these because "as dark as it
+    // should be" depends entirely on the screen and the room.
+    float by = h * 0.60f;
+    std::snprintf(line, sizeof(line), "BRIGHTNESS  %d%%", (int)(mBrightness * 100.0f));
+    mR.uiTextCentered(line, w * 0.5f, by, 18.0f * s, 0.72f, 0.72f, 0.70f, 0.9f);
+    mR.uiDisc(w * 0.5f - 150.0f * s, by + 8.0f * s, 26.0f * s, 0.8f, 0.8f, 0.84f, 0.18f);
+    mR.uiDisc(w * 0.5f + 150.0f * s, by + 8.0f * s, 26.0f * s, 0.8f, 0.8f, 0.84f, 0.18f);
+    mR.uiTextCentered("-", w * 0.5f - 150.0f * s, by + 1.0f * s, 22.0f * s, 0.95f, 0.95f, 0.95f, 0.9f);
+    mR.uiTextCentered("+", w * 0.5f + 150.0f * s, by + 1.0f * s, 22.0f * s, 0.95f, 0.95f, 0.95f, 0.9f);
+
+    // A calibration strip: the rightmost bar should be just barely visible.
+    float sw = 40.0f * s, sx = w * 0.5f - sw * 2.5f, sy = by + 46.0f * s;
+    for (int i = 0; i < 5; i++) {
+        float v = 0.02f + i * 0.022f;
+        mR.uiQuad(sx + i * sw, sy, sw - 3.0f * s, 22.0f * s, v, v, v * 1.1f, 1.0f);
+    }
+    mR.uiTextCentered("RAISE UNTIL THE LEFTMOST BAR IS JUST VISIBLE",
+                      w * 0.5f, sy + 30.0f * s, 12.0f * s, 0.45f, 0.45f, 0.46f, 0.8f);
 
     mR.uiTextCentered("TAP TO BEGIN", w * 0.5f, h - 110.0f * s, 20.0f * s,
                       0.60f, 0.60f, 0.60f, 0.5f + 0.35f * std::sin(mTime * 2.2f));

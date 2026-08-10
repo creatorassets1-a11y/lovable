@@ -29,6 +29,7 @@ struct Player {
     float noise = 0.0f;         // 0..1, what the stalker can hear
     float speedNow = 0.0f;
     float shake = 0.0f;         // trauma, decays; used for camera kick
+    int   stepCount = 0;        // paces taken, used to space out floor creaks
 
     static constexpr float EYE_STAND = 1.66f;
     static constexpr float EYE_CROUCH = 0.95f;

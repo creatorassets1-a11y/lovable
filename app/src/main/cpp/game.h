@@ -90,6 +90,8 @@ private:
     bool  mReady = false;
     bool  mPackOk = false;
 
+    float mBrightness = 1.15f;   // player-set exposure, persisted
+    bool  mOnDoorway = false;    // edge-detects crossing a threshold
     int   mFlares = 3;
     float mFlareCooldown = 0.0f;
 
